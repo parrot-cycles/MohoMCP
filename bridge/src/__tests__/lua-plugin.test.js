@@ -177,6 +177,16 @@ describe("Lua document metadata", () => {
   `));
 });
 
+describe("Lua document.screenshot", () => {
+  it("refuses scene rendering on macOS instead of calling FileRender", () => runLua(documentSetup + `
+    local rendered = false
+    moho.FileRender = function() rendered = true end
+    local r, err = document.screenshot(moho, {})
+    assert(r == nil and err:find('mode "full"', 1, true), tostring(err))
+    assert(not rendered, "FileRender must not be called")
+  `));
+});
+
 describe("Lua animation keyframes", () => {
   it("queries interpolation at each key's frame rather than its index", () => runLua(`
     MOHO={INTERP_LINEAR=0,INTERP_SMOOTH=1,INTERP_STEP=5}

@@ -248,6 +248,14 @@ end
 -- @return table|nil  {success, filePath, frame, width, height} on success
 -- @return string|nil  An error message on failure
 function document.screenshot(moho, params)
+    -- On macOS, moho:FileRender called from the poll (inside a DrawMe/IsEnabled
+    -- callback) crashes Moho with SIGSEGV in ScriptInterface_FileRender.
+    -- Windows keeps the render path: the same callback context applies there,
+    -- but no crash has been observed on Windows.
+    if package.config:sub(1, 1) == "/" then
+        return nil, 'Scene render is disabled on macOS: moho:FileRender inside the MohoMCP poll crashes Moho. '
+            .. 'Use document_screenshot with mode "full" instead.'
+    end
     if not moho or not moho.document then
         return nil, "No active document"
     end

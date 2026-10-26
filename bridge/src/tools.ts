@@ -61,6 +61,10 @@ async function ensureConnected(client: MohoClient): Promise<void> {
   }
 }
 
+export const SCENE_RENDER_DISABLED_MAC =
+  'document_screenshot mode "scene" is disabled on macOS: Moho crashes when it renders (FileRender) ' +
+  'from inside the MohoMCP poll. Use mode "full" to capture the Moho window instead.';
+
 // ---------------------------------------------------------------------------
 // Tool registration
 // ---------------------------------------------------------------------------
@@ -597,7 +601,8 @@ export function registerTools(server: McpServer, client: MohoClient): void {
   // 22. document.screenshot — Render the scene and return as an image
   server.tool(
     "document_screenshot",
-    'Render the MOHO scene or capture the full application window and return as an image. Use mode "scene" (default) for a clean rendered frame, or "full" for the entire MOHO UI including timeline, layers panel, etc.',
+    'Render the MOHO scene or capture the full application window and return as an image. Use mode "scene" (default) for a clean rendered frame, or "full" for the entire MOHO UI including timeline, layers panel, etc. ' +
+      'On macOS only "full" is available (scene rendering from the plugin crashes Moho).',
     {
       mode: z
         .enum(["scene", "full"])
@@ -662,7 +667,12 @@ export function registerTools(server: McpServer, client: MohoClient): void {
           };
         }
 
-        // Scene mode — use MOHO's FileRender via Lua
+        // Scene mode — use MOHO's FileRender via Lua. On macOS FileRender
+        // inside the plugin's poll crashes Moho (SIGSEGV in
+        // ScriptInterface_FileRender), so refuse before sending anything.
+        if (os.platform() === "darwin") {
+          throw new Error(SCENE_RENDER_DISABLED_MAC);
+        }
         await ensureConnected(client);
         const params: Record<string, unknown> = {};
         if (frame !== undefined) params.frame = frame;

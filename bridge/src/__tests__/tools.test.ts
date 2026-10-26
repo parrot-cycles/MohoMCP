@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
+import os from "node:os";
 import { registerTools } from "../tools.js";
 import { MohoClient } from "../moho-client.js";
 
@@ -329,6 +330,21 @@ describe("registerTools", () => {
       };
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("boom");
+    });
+
+    it("document_screenshot scene mode refuses on macOS without contacting Moho", async () => {
+      const spy = vi.spyOn(os, "platform").mockReturnValue("darwin");
+      try {
+        const result = (await findTool("document_screenshot").handler({})) as {
+          isError?: boolean;
+          content: Array<{ text: string }>;
+        };
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('mode "full"');
+        expect(client.sendRequest).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });
