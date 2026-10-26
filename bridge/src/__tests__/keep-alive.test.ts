@@ -99,6 +99,52 @@ describe("keep-alive lifecycle", () => {
     expect(MOHO_MENU_FOLDER).toBe("MohoMCP");
   });
 
+  describe("Moho pid cache (real helper code, stubbed ObjC)", () => {
+    function load(env: { running: boolean; walks: { n: number } }) {
+      const moho = { bundleIdentifier: "com.lostmarble.moho", processIdentifier: 42 };
+      const $ = {
+        NSWorkspace: {
+          sharedWorkspace: {
+            get runningApplications() {
+              env.walks.n++;
+              const list = env.running ? [moho] : [];
+              return { count: list.length, objectAtIndex: (i: number) => list[i] };
+            },
+          },
+        },
+        NSRunningApplication: {
+          runningApplicationWithProcessIdentifier: (pid: number) =>
+            env.running && pid === 42 ? { isNil: () => false, terminated: false, bundleIdentifier: "com.lostmarble.moho" } : null,
+        },
+      };
+      return new Function("ObjC", "$", "Ref", "delay", "console", `${MACOS_KEEPALIVE_JXA}\nreturn { cachedPid };`)(
+        { import() {}, bindFunction() {}, unwrap: (x: unknown) => x, deepUnwrap: (x: unknown) => x }, $, () => [], () => {}, console,
+      ) as { cachedPid: (s: Record<string, number>, id: string, now: number) => number };
+    }
+
+    it("walks the app list once while Moho keeps running", () => {
+      const env = { running: true, walks: { n: 0 } };
+      const { cachedPid } = load(env);
+      const st = {};
+      for (let t = 0; t < 2000; t += 100) expect(cachedPid(st, "com.lostmarble.moho", t)).toBe(42);
+      expect(env.walks.n).toBe(1);
+    });
+
+    it("notices Moho quitting and looks again at most once a second while it is gone", () => {
+      const env = { running: true, walks: { n: 0 } };
+      const { cachedPid } = load(env);
+      const st = {};
+      expect(cachedPid(st, "com.lostmarble.moho", 0)).toBe(42);
+      env.running = false;
+      expect(cachedPid(st, "com.lostmarble.moho", 100)).toBe(0); // invalidated, one walk
+      for (let t = 200; t < 1100; t += 100) expect(cachedPid(st, "com.lostmarble.moho", t)).toBe(0);
+      expect(env.walks.n).toBe(2);
+      env.running = true;
+      expect(cachedPid(st, "com.lostmarble.moho", 1100)).toBe(42);
+      expect(env.walks.n).toBe(3);
+    });
+  });
+
   describe("wake scheduling (real helper code, stubbed ObjC)", () => {
     type State = Record<string, number | boolean>;
     const { wakeStep } = new Function(

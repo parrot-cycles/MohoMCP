@@ -109,4 +109,13 @@ describe.skipIf(process.platform !== "darwin")("macOS JXA keep-alive helper", ()
     expect(run("--wake", String(finder), pick!.title, subTitle)).toEqual({ first: true, cached: true, second: true });
     expect(run("--wake", String(finder), pick!.title, "No Such Item 123")).toEqual({ first: false, cached: false, second: false });
   });
+
+  it("caches the pid of a running app and remembers a miss", () => {
+    const run = (...a: string[]) =>
+      JSON.parse(execFileSync("osascript", ["-l", "JavaScript", script, ...a], { encoding: "utf8" }));
+    const finder = run("--pidcache", "com.apple.finder");
+    expect(finder.first).toBeGreaterThan(0);
+    expect(finder.second).toBe(finder.first);
+    expect(run("--pidcache", "com.example.no-such-moho")).toEqual({ first: 0, second: 0, checkedAt: true });
+  });
 });

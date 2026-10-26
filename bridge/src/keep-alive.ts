@@ -119,7 +119,15 @@ export const MOHO_MENU_FOLDER = "MohoMCP";
 export const MOHO_SERVER_MENU_ITEM = "Start/Stop MohoMCP Server";
 export const NO_EVENT_ACCESS_TOKEN = "MOHOMCP_NO_EVENT_ACCESS";
 export const NO_AX_ACCESS_TOKEN = "MOHOMCP_NO_AX_ACCESS";
-export const WAKE_TIMING = { tickMs: 100, nudgeEveryMs: 250, axAfterMs: 300, axEveryMs: 400 };
+export const WAKE_TIMING = {
+  tickMs: 100,          // loop period while a request is pending
+  idleTickMs: 250,      // loop period while nothing is pending
+  nudgeEveryMs: 250,
+  axAfterMs: 300,
+  axEveryMs: 400,
+  pidRecheckMs: 1000,   // how often to look for Moho again when it is not running
+  axMissRetryMs: 2000,  // how long to wait before searching the menus again after a miss
+};
 
 export const MACOS_KEEPALIVE_JXA = String.raw`
 ObjC.import('Foundation');
@@ -149,7 +157,7 @@ function pending(dir) {
   return false;
 }
 
-// pid of the running app with this bundle identifier, else 0.
+// pid of the running app with this bundle identifier, else 0 (walks every app).
 function findPid(bundleId) {
   var apps = $.NSWorkspace.sharedWorkspace.runningApplications;
   for (var i = 0; i < apps.count; i++) {
@@ -157,6 +165,22 @@ function findPid(bundleId) {
     if (ObjC.unwrap(app.bundleIdentifier) === bundleId) return app.processIdentifier;
   }
   return 0;
+}
+
+// Moho's pid, cached: while the cached process is still that app, no app list
+// walk is needed; when Moho is not running, look again at most every
+// pidRecheckMs. state = { pid, checkedAt }.
+function cachedPid(state, bundleId, now) {
+  if (state.pid > 0) {
+    var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(state.pid);
+    if (app && !app.isNil() && !app.terminated && ObjC.unwrap(app.bundleIdentifier) === bundleId) return state.pid;
+    state.pid = 0;
+    state.checkedAt = -Infinity;
+  }
+  if (state.checkedAt !== undefined && now - state.checkedAt < TIMING.pidRecheckMs) return 0;
+  state.checkedAt = now;
+  state.pid = findPid(bundleId);
+  return state.pid;
 }
 
 function nudge(pid) {
@@ -215,13 +239,15 @@ function axFindItem(pid, itemTitle, subTitle) {
   }
   return null;
 }
-var cachedItem = null, cachedPid = 0;
+var cachedItem = null, cachedItemPid = 0, axMissAt = -Infinity;
 // Read our menu item's enabled state; Moho validates the menu to answer.
 function axWake(pid, itemTitle, subTitle) {
-  if (!cachedItem || cachedPid !== pid) {
+  if (!cachedItem || cachedItemPid !== pid) {
+    var now = Date.now();
+    if (cachedItemPid === pid && now - axMissAt < TIMING.axMissRetryMs) return false;
     cachedItem = axFindItem(pid, itemTitle || MENU_FOLDER, subTitle || SERVER_ITEM);
-    cachedPid = pid;
-    if (!cachedItem) return false;
+    cachedItemPid = pid;
+    if (!cachedItem) { axMissAt = now; return false; }
   }
   var enabled = axAttr(cachedItem, 'AXEnabled');
   if (enabled === null) { cachedItem = null; return false; }
@@ -268,6 +294,12 @@ function run(argv) {
       });
     }));
   }
+  if (argv[0] === '--pidcache') {
+    var st = {}, t0 = Date.now();
+    var a = cachedPid(st, argv[1], t0);
+    var b = cachedPid(st, argv[1], t0 + 10);
+    return JSON.stringify({ first: a, second: b, checkedAt: st.checkedAt === t0 });
+  }
   if (argv[0] === '--wake') {
     var first = axWake(Number(argv[1]), argv[2], argv[3]);
     var cached = !!cachedItem;
@@ -285,18 +317,19 @@ function run(argv) {
   if (axTrusted() === false) console.log(${JSON.stringify(NO_AX_ACCESS_TOKEN)});
   // Exit once the bridge that spawned us is gone (we get reparented).
   var parent = argv[2] ? Number(argv[2]) : $.getppid();
-  var state = {};
+  var state = {}, pidState = {};
   while (true) {
     if ($.getppid() !== parent) return;
+    var isPending = false;
     try {
-      var isPending = pending(dir);
-      var pid = isPending ? findPid(bundleId) : 0;
+      isPending = pending(dir);
+      var pid = isPending ? cachedPid(pidState, bundleId, Date.now()) : 0;
       wakeStep(state, Date.now(), isPending && pid > 0, {
         nudge: function () { nudge(pid); },
         axWake: function () { try { axWake(pid); } catch (e) { cachedItem = null; } },
       });
     } catch (e) {}
-    delay(TIMING.tickMs / 1000);
+    delay((isPending ? TIMING.tickMs : TIMING.idleTickMs) / 1000);
   }
 }
 `;
