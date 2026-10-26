@@ -516,7 +516,8 @@ end
 -- moho:PlaceLayerInGroup(layer, group, true, false), PrepUndo(nil)+SetDirty
 -- (Scripts/Menu/Tiling/lm_tile1.lua:142-151, Particle Effects/lm_snow.lua:45-50,79-81).
 -- @param params table { type: "vector"|"group"|"bone", name: string, parent?: number|string }
--- @return table { layerId, name, type, parentId }
+-- @return table { layerId, name, type, parentId } (parentId: the layer's actual
+--   parent after creation, -1 at the top level)
 function layer.create(moho, params)
     local edit = require("moho_mcp.edit")
     local M = edit.M()
@@ -561,6 +562,13 @@ function layer.create(moho, params)
     if parentGroup ~= nil then
         moho:PlaceLayerInGroup(newLayer, parentGroup, true, false)
     end
+
+    -- Report where Moho actually put the layer: without `parent`, Moho creates
+    -- it next to the current layer, which may be inside a group.
+    -- layer:Parent() as in Scripts/Menu/Layer Effects/rt_break_apart_shapes.lua:132.
+    local actualParent = nil
+    pcall(function() actualParent = newLayer:Parent() end)
+    parentId = actualParent and edit.layerId(moho, actualParent) or -1
 
     edit.finish()
 

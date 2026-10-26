@@ -549,7 +549,7 @@ Create a new layer.
 ```json
 { "layerId": 7, "name": "Face", "type": "vector", "parentId": 3 }
 ```
-`parentId` is `-1` when no parent was given.
+`parentId` is the layer's actual parent after creation (`-1` at the top level). Without `parent`, Moho creates the layer next to the current layer, which may be inside a group.
 
 ---
 

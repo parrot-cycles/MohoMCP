@@ -223,7 +223,7 @@
           "layerId": { "type": "number" },
           "name": { "type": "string" },
           "type": { "type": "string" },
-          "parentId": { "type": "number", "description": "-1 when no parent was given" }
+          "parentId": { "type": "number", "description": "Actual parent layer ID after creation; -1 at the top level" }
         }
       }
     },

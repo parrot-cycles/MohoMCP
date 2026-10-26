@@ -283,6 +283,7 @@ local function newLayer(name, lt)
   function l:IsBoneType() return self.lt == MOHO.LT_BONE end
   function l:CountLayers() return #self.children end
   function l:Layer(i) return self.children[i + 1] end
+  function l:Parent() return self.parent end
   return l
 end
 
@@ -322,7 +323,7 @@ rig = addRoot("Rig", MOHO.LT_BONE)
 rig.skel = newSkeleton()
 local hip = rig.skel:AddBone(0); hip.name = "hip"; hip.fRestMatrix = {ox=1, oy=0}
 sketch = newLayer("Sketch", MOHO.LT_VECTOR); all[sketch.id] = sketch
-rig.children[1] = sketch
+rig.children[1] = sketch; sketch.parent = rig
 
 moho = {document=doc, layer=art, uiUpdates=0}
 function moho:SetSelLayer(l) log("SetSelLayer " .. l.name); self.layer = l end
@@ -330,12 +331,20 @@ function moho:Mesh() return self.layer.mesh end
 function moho:LayerAsGroup(l) return l end
 function moho:LayerAsBone(l) return {Skeleton=function() return l.skel end} end
 function moho:UpdateUI() self.uiUpdates = self.uiUpdates + 1 end
+-- Like Moho, a new layer goes next to the current layer, inside its group.
 function moho:CreateNewLayer(lt, flag)
-  log("CreateNewLayer"); local l = addRoot("Layer " .. nextId, lt); self.layer = l; return l
+  log("CreateNewLayer")
+  local l = newLayer("Layer " .. nextId, lt); all[l.id] = l
+  local group = self.layer and self.layer.parent
+  if group then group.children[#group.children + 1] = l; l.parent = group else root[#root + 1] = l end
+  self.layer = l
+  return l
 end
 function moho:PlaceLayerInGroup(l, g, a, b)
-  for i, x in ipairs(root) do if x == l then table.remove(root, i) break end end
+  local from = l.parent and l.parent.children or root
+  for i, x in ipairs(from) do if x == l then table.remove(from, i) break end end
   g.children[#g.children + 1] = l
+  l.parent = g
 end
 function moho:CreateShape(fill, b, f)
   local mesh = self.layer.mesh
@@ -366,6 +375,16 @@ describe("Lua layer.create", () => {
     assert(indexOf("PrepUndo nil") < indexOf("CreateNewLayer"), "undo must be prepared first")
     assert(indexOf("SetDirty"))
     assert(edit.uiDirty == true)
+  `));
+
+  it("reports the parent Moho actually used, also when no parent was requested", () => runLua(fakeMoho + `
+    local g = assert(layerTools.create(moho, {type="group", name="G"}))
+    assert(g.parentId == -1)
+    local inner = assert(layerTools.create(moho, {type="vector", name="Inner", parent="G"}))
+    assert(inner.parentId == g.layerId)
+    moho.layer = doc:LayerByAbsoluteID(inner.layerId) -- Moho makes the new layer current
+    local rig2 = assert(layerTools.create(moho, {type="bone", name="Rig2"}))
+    assert(rig2.parentId == g.layerId, "parentId " .. tostring(rig2.parentId) .. " but the layer is inside G")
   `));
 
   it("creates group and bone layers and rejects other types or non-group parents", () => runLua(fakeMoho + `
