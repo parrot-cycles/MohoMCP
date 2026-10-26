@@ -144,12 +144,12 @@ The bridge and MOHO communicate via JSON files in a platform-specific temp direc
 ```
 <temp>/moho-mcp/
 ├── status.json          <- Written by Lua when server starts
-├── req_1.json           <- Bridge writes request
-├── resp_1.json          <- Lua writes response, deletes req file
+├── req_<id>.json        <- Bridge writes request
+├── resp_<id>.json       <- Lua writes response, deletes req file
 └── ...
 ```
 
-1. Bridge writes a JSON-RPC 2.0 request as `req_<id>.json`
+1. Bridge writes a JSON-RPC 2.0 request as `req_<id>.json`. `<id>` is digits only: a per-process prefix (last 5 digits of the pid + last 4 digits of the start time in ms) followed by a 6-digit sequence, so concurrent bridge processes never share a file name
 2. MOHO Lua plugin polls for new request files during DrawMe/IsEnabled callbacks
 3. Lua processes the request, writes `resp_<id>.json`, deletes the request file
 4. Bridge reads the response, deletes the response file

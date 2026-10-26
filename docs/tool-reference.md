@@ -1,6 +1,6 @@
 # MohoMCP Tool Reference
 
-Complete reference for all 26 MCP tools and 2 knowledge resources.
+Complete reference for all 30 MCP tools and 2 knowledge resources.
 
 ---
 
@@ -527,6 +527,105 @@ Send a keyboard shortcut to the MOHO window.
 | `"delete"` | Delete selected |
 
 See the `moho://shortcuts` resource for the complete shortcut reference.
+
+---
+
+## Creation Tools
+
+All creation tools are single undo steps (`PrepUndo` + `SetDirty`, as Moho's own scripts do) and refresh the MOHO UI once after the request. Wherever a `layer` is accepted it may be an absolute layer ID (number) or a layer name (string, first match depth-first); omitted means the current layer.
+
+### `layer_create`
+
+Create a new layer.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `type` | string | Yes | `"vector"`, `"group"` or `"bone"` |
+| `name` | string | Yes | Name for the new layer |
+| `parent` | number \| string | No | Group or bone layer to place the new layer in (ID or name) |
+
+**Returns:**
+```json
+{ "layerId": 7, "name": "Face", "type": "vector", "parentId": 3 }
+```
+`parentId` is `-1` when no parent was given.
+
+---
+
+### `shape_draw`
+
+Draw a new shape from points in a vector layer. Points are in Moho world units: the default 16:9 frame spans about x −1.78…1.78 and y −1…1, with +y up.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `layer` | number \| string | No | Target vector layer (default: current layer) |
+| `points` | `[[x, y], ...]` | Yes | At least 2 points (3 when `closed`) |
+| `closed` | boolean | No | Close the path into a fillable polygon (default `false`) |
+| `fill` | `{r, g, b, a?}` | No | Fill color; closed shapes only. Without `stroke`, the shape has no outline |
+| `stroke` | `{r, g, b, a?}` | No | Outline color |
+| `strokeWidth` | number | No | Outline width in pixels (stored as width / document height) |
+| `smooth` | boolean | No | Smooth (curved) corners instead of sharp ones (default `false`) |
+
+Colors use channels 0–1; if any channel is above 1 the whole color is read as 0–255. `a` defaults to opaque. With neither `fill` nor `stroke`, MOHO's current style is used (closed: fill + outline; open: outline). The target layer becomes the current layer.
+
+**Returns:**
+```json
+{
+  "layerId": 7, "layerName": "Face", "shapeId": 0,
+  "pointIds": [0, 1, 2], "closed": true, "hasFill": true, "hasOutline": false
+}
+```
+
+---
+
+### `bone_create`
+
+Add a bone to a bone layer's rest pose (frame 0).
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `layer` | number \| string | No | Bone layer (default: current layer) |
+| `name` | string | Yes | Bone name |
+| `origin` | `[x, y]` | Yes | Base of the bone in the layer's coordinates |
+| `length` | number | Yes | Bone length (world units, ≥ 0) |
+| `angle` | number | No | Angle in radians, 0 = +x (default 0) |
+| `parent` | number \| string | No | Parent bone ID or name; the bone is stored in the parent's space |
+
+**Returns:**
+```json
+{ "layerId": 3, "boneId": 1, "name": "thigh", "parentId": 0 }
+```
+
+---
+
+### `lua_run`
+
+Execute a Lua chunk inside MOHO, the equivalent of Blender MCP's `execute_blender_code`. In scope: `moho` (the ScriptInterface of the current callback), `doc` / `document` (`moho.document`), `json`, and all MOHO globals (`MOHO`, `LM`, ...). Globals assigned by the chunk stay in a per-call environment.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `code` | string | Yes | Lua source |
+| `undo` | boolean | No | Wrap the run in an undo step and mark the document dirty (default `true`); pass `false` for read-only queries |
+
+**Returns:**
+```json
+{ "result": { "layers": 4 }, "output": "printed lines\nseparated by newlines" }
+```
+`result` is the chunk's return value (several values become an array; none becomes `null`). Tables become arrays (keys 1..n) or objects; userdata, functions and threads become `tostring()` strings. `print()` output is captured (up to 64 KB). A Lua error is returned as JSON-RPC error `-32603` whose message holds the Lua error and any output printed before it; the server keeps running. A chunk that runs longer than ~8 s of CPU is stopped.
+
+**Example:**
+```lua
+local n = 0
+for i = 0, doc:CountLayers() - 1 do n = n + 1 end
+print("top-level layers:", n)
+return { layers = n, current = moho.layer:Name() }
+```
+
+> `lua_run` can do anything a Moho script can, including file and shell access through `io`/`os`.
 
 ---
 

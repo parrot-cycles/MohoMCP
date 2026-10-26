@@ -31,11 +31,12 @@ An MCP (Model Context Protocol) server for **Moho Pro 14** — enabling AI assis
 |------------|-------------|
 | **Read** | Query document structure, layers, bones, animation keyframes, mesh data |
 | **Write** | Set bone/layer transforms, create/delete keyframes, change interpolation, rename layers |
+| **Create** | Create layers, draw filled/stroked shapes, add bones, run arbitrary Lua inside Moho |
 | **See** | Capture rendered scene frames or full MOHO UI screenshots |
 | **Interact** | Send mouse clicks, drags, and keyboard shortcuts to the MOHO window |
 | **Know** | Built-in reference data for all Moho 14 tools and keyboard shortcuts |
 
-## Available Tools (26)
+## Available Tools (30)
 
 ### Read-Only Tools
 
@@ -76,6 +77,15 @@ An MCP (Model Context Protocol) server for **Moho Pro 14** — enabling AI assis
 | `input_mouseClick` | Click at window-relative coordinates (left/right/middle, single/double) |
 | `input_mouseDrag` | Drag from point A to B with configurable steps |
 | `input_sendKeys` | Send keyboard shortcuts (e.g. `ctrl+z`, `space`, `a`) |
+
+### Creation Tools
+
+| Tool | Description |
+|------|-------------|
+| `layer_create` | Create a vector, group or bone layer (optionally inside a parent) |
+| `shape_draw` | Draw a closed (fillable) or open shape from points, with fill/stroke color and width |
+| `bone_create` | Add a named bone (origin, length, angle, optional parent) to a bone layer |
+| `lua_run` | Run a Lua chunk inside Moho with `moho`/`doc` in scope; returns its value as JSON plus `print()` output |
 
 ### Batch Execution
 
@@ -176,8 +186,8 @@ Internal timing (in `bridge/src/config.ts`):
 
 Communication uses JSON files in the system temp directory (`%TEMP%\moho-mcp\` on Windows, `$TMPDIR/moho-mcp/` on macOS):
 
-1. Bridge writes `req_<id>.json` (JSON-RPC 2.0 request)
-2. MOHO Lua plugin polls for request files via DrawMe/IsEnabled callbacks
+1. Bridge writes `req_<id>.json` (JSON-RPC 2.0 request); `<id>` is a per-process prefix (pid + start time) plus a sequence number, so several bridge processes can share one MOHO
+2. MOHO Lua plugin polls for request files via DrawMe/IsEnabled callbacks, listing the directory with Moho's `BeginFileListing`/`GetNextFile`
 3. Lua processes the request, writes `resp_<id>.json`
 4. Bridge reads the response, cleans up files
 
@@ -192,6 +202,7 @@ MOHO only processes Lua callbacks during UI repaints. A background process perio
 - **Allow-list validation**: Only explicitly registered methods can be called
 - **Parameter validation**: All parameters type-checked before execution
 - **pcall wrapping**: All Lua handlers wrapped in protected calls — a crash in one method won't crash the server
+- **`lua_run` is arbitrary code execution**: it runs any Lua (including `io`/`os`) inside MOHO with your user's permissions. Only connect MCP clients you trust.
 
 ## Development
 
@@ -213,7 +224,7 @@ MohoMCP/
 │       ├── config.ts          # IPC directory, timeouts
 │       ├── moho-client.ts     # File-based IPC client
 │       ├── protocol.ts        # JSON-RPC 2.0 types
-│       ├── tools.ts           # 26 MCP tool registrations
+│       ├── tools.ts           # 30 MCP tool registrations
 │       ├── resources.ts       # Static knowledge resources
 │       ├── keep-alive.ts      # Cross-platform viewport refresh
 │       ├── platform-capture.ts # Platform dispatch → window capture
@@ -232,12 +243,15 @@ MohoMCP/
 │       ├── server.lua         # File-based IPC server
 │       ├── protocol.lua       # JSON-RPC 2.0 protocol
 │       ├── validator.lua      # Method allow-list & validation
+│       ├── edit.lua           # Shared helpers for creation tools (undo, colors, layer lookup)
 │       └── tools/             # Handler implementations
 │           ├── document.lua
 │           ├── layer.lua
 │           ├── bone.lua
 │           ├── animation.lua
 │           ├── mesh.lua
+│           ├── shape.lua      # shape.draw
+│           ├── script.lua     # lua.run
 │           └── batch.lua
 │
 ├── docs/                      # Documentation
@@ -250,7 +264,7 @@ MohoMCP/
 
 ## Platform Support
 
-All 26 tools work identically on both platforms. The bridge auto-detects the OS at runtime and loads the appropriate native backend — no configuration needed.
+All 30 tools work identically on both platforms. The bridge auto-detects the OS at runtime and loads the appropriate native backend — no configuration needed.
 
 | Feature | Windows | macOS |
 |---------|---------|-------|

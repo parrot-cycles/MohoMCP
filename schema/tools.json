@@ -205,6 +205,100 @@
           "shapes": { "type": "array" }
         }
       }
+    },
+    "layer.create": {
+      "description": "Create a vector, group or bone layer",
+      "params": {
+        "type": "object",
+        "required": ["type", "name"],
+        "properties": {
+          "type": { "type": "string", "enum": ["vector", "group", "bone"] },
+          "name": { "type": "string" },
+          "parent": { "type": ["number", "string"], "description": "Parent group/bone layer ID or name" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "layerId": { "type": "number" },
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "parentId": { "type": "number", "description": "-1 when no parent was given" }
+        }
+      }
+    },
+    "shape.draw": {
+      "description": "Draw a shape from points in a vector layer (one undo step)",
+      "params": {
+        "type": "object",
+        "required": ["points"],
+        "properties": {
+          "layer": { "type": ["number", "string"], "description": "Absolute layer ID or name; default current layer" },
+          "layerId": { "type": "number", "description": "Alias of layer" },
+          "points": { "type": "array", "minItems": 2, "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } },
+          "closed": { "type": "boolean" },
+          "fill": { "type": "object", "required": ["r", "g", "b"], "description": "Channels 0-1, or 0-255 if any channel is above 1; closed shapes only" },
+          "stroke": { "type": "object", "required": ["r", "g", "b"], "description": "Channels 0-1, or 0-255 if any channel is above 1" },
+          "strokeWidth": { "type": "number", "minimum": 0, "description": "Pixels" },
+          "smooth": { "type": "boolean" },
+          "curved": { "type": "boolean", "description": "Alias of smooth" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "layerId": { "type": "number" },
+          "layerName": { "type": "string" },
+          "shapeId": { "type": "number" },
+          "pointIds": { "type": "array", "items": { "type": "number" } },
+          "closed": { "type": "boolean" },
+          "hasFill": { "type": "boolean" },
+          "hasOutline": { "type": "boolean" }
+        }
+      }
+    },
+    "bone.create": {
+      "description": "Add a bone to a bone layer's rest pose (one undo step)",
+      "params": {
+        "type": "object",
+        "required": ["name", "origin", "length"],
+        "properties": {
+          "layer": { "type": ["number", "string"], "description": "Absolute layer ID or name; default current layer" },
+          "layerId": { "type": "number", "description": "Alias of layer" },
+          "name": { "type": "string" },
+          "origin": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+          "length": { "type": "number", "minimum": 0 },
+          "angle": { "type": "number", "description": "Radians, default 0" },
+          "parent": { "type": ["number", "string"], "description": "Parent bone ID or name" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "layerId": { "type": "number" },
+          "boneId": { "type": "number" },
+          "name": { "type": "string" },
+          "parentId": { "type": "number" }
+        }
+      }
+    },
+    "lua.run": {
+      "description": "Execute a Lua chunk inside MOHO with moho/doc in scope",
+      "params": {
+        "type": "object",
+        "required": ["code"],
+        "properties": {
+          "code": { "type": "string" },
+          "undo": { "type": "boolean", "description": "Wrap in an undo step and mark dirty (default true)" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "result": { "description": "The chunk's return value as JSON (null when none)" },
+          "output": { "type": "string", "description": "Captured print() output" }
+        }
+      }
     }
   }
 }
