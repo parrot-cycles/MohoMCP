@@ -22,6 +22,13 @@ import { startKeepAlive, stopKeepAlive } from "./keep-alive.js";
 // Request IDs
 // ---------------------------------------------------------------------------
 
+/**
+ * IPC protocol version this bridge speaks. The Lua plugin writes its own as
+ * `protocol` in status.json (moho-plugin/moho_mcp/server.lua); they must match.
+ * 2 = per-process request ID prefixes, which older plugins cannot find.
+ */
+export const PROTOCOL_VERSION = 2;
+
 /** Sequence numbers per process run from 1 to SEQ_SPACE - 1, then wrap. */
 export const SEQ_SPACE = 1_000_000;
 
@@ -38,6 +45,26 @@ export function makeIdPrefix(pid: number = process.pid, startMs: number = Date.n
 export interface MohoClientOptions {
   /** Override the per-process ID prefix (tests). */
   idPrefix?: number;
+}
+
+/**
+ * Refuse to talk to a plugin that speaks another protocol: an older plugin
+ * never sees this bridge's request files, so every call would time out.
+ */
+export function checkProtocol(protocol: unknown): void {
+  if (protocol === PROTOCOL_VERSION) return;
+  if (typeof protocol !== "number" || protocol < PROTOCOL_VERSION) {
+    throw new Error(
+      "Moho is running an older MohoMCP plugin " +
+        `(protocol ${typeof protocol === "number" ? protocol : "1 or unknown"}, this bridge needs ${PROTOCOL_VERSION}) — ` +
+        "restart Moho to load the new one, then start the MohoMCP server again. " +
+        "Upgrade the bridge and the plugin together.",
+    );
+  }
+  throw new Error(
+    `Moho is running a newer MohoMCP plugin (protocol ${protocol}) than this bridge ` +
+      `(protocol ${PROTOCOL_VERSION}) — rebuild the bridge (npm run build) and restart your MCP client.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +116,7 @@ export class MohoClient {
       if (!status.running) {
         throw new Error("MOHO MCP server is not running (status.running=false)");
       }
+      checkProtocol(status.protocol);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(

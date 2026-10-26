@@ -5,6 +5,11 @@
 
 local server = {}
 
+-- IPC protocol version, written to status.json and checked by the bridge.
+-- 2 = per-process request ID prefixes (needs the directory listing below).
+-- Bump whenever bridge and plugin must be upgraded together.
+server.PROTOCOL_VERSION = 2
+
 -- Dependencies (set by init)
 local protocol = nil
 local validator = nil
@@ -203,6 +208,7 @@ function server.start(moho)
         running = true,
         pid = "moho",
         version = "0.1.0",
+        protocol = server.PROTOCOL_VERSION,
         startedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     }))
 

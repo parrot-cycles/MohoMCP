@@ -125,6 +125,14 @@ Edit your Claude Desktop configuration file:
 
 Add the MohoMCP server (same format as above — use the full path to `bridge/dist/index.js`).
 
+## Updating
+
+**Upgrade the bridge and the plugin together, then restart Moho.** Moho loads the plugin's Lua modules once and keeps them in memory, so pulling new plugin files (or re-running the install script) has no effect until Moho is restarted. The plugin writes its IPC protocol version into `status.json`; a bridge that needs a different version refuses to connect with "Moho is running an older MohoMCP plugin — restart Moho to load the new one" instead of letting every request time out.
+
+1. Update the checkout (or re-run the install script) and rebuild the bridge: `cd bridge && npm run build`
+2. Quit and restart Moho, then start **Scripts > MohoMCP Server** again
+3. Restart your MCP clients so they run the new `bridge/dist`
+
 ## Step 4: Start Everything
 
 1. **Open Moho Pro 14** and load a project
@@ -197,6 +205,10 @@ Configured in `bridge/src/config.ts`:
   - **Windows:** `dir %TEMP%\moho-mcp\status.json`
   - **macOS:** `ls $TMPDIR/moho-mcp/status.json`
 - Verify the IPC directory is accessible
+
+### "Moho is running an older MohoMCP plugin"
+
+The bridge and the plugin in Moho's memory speak different IPC protocol versions. Restart Moho so it loads the updated plugin, start the MohoMCP Server again, and retry. If the message says the plugin is *newer*, rebuild the bridge (`npm run build`) and restart your MCP client.
 
 ### Requests time out
 

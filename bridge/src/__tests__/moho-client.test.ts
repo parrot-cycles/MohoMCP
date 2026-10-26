@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { MohoClient, makeIdPrefix, SEQ_SPACE } from "../moho-client.js";
+import { MohoClient, makeIdPrefix, SEQ_SPACE, PROTOCOL_VERSION } from "../moho-client.js";
 
 // File-IPC tests must not launch desktop automation on the developer's machine.
 vi.mock("../keep-alive.js", () => ({
@@ -31,11 +31,14 @@ function cleanupTestIpcDir(dir: string): void {
 }
 
 /** Write a status.json that indicates the server is running. */
-function writeStatusFile(dir: string, running = true): void {
-  fs.writeFileSync(
-    path.join(dir, "status.json"),
-    JSON.stringify({ running, pid: "moho", version: "0.1.0" }),
-  );
+function writeStatusFile(
+  dir: string,
+  running = true,
+  protocol: number | null = PROTOCOL_VERSION, // null = field absent (old plugin)
+): void {
+  const status: Record<string, unknown> = { running, pid: "moho", version: "0.1.0" };
+  if (protocol !== null) status.protocol = protocol;
+  fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(status));
 }
 
 /**
@@ -164,6 +167,22 @@ describe("MohoClient", () => {
         "MOHO MCP server is not running",
       );
       expect(client.isConnected()).toBe(false);
+    });
+
+    it("rejects an older plugin without a protocol field with a restart hint", async () => {
+      writeStatusFile(testIpcDir, true, null);
+      await expect(client.connect()).rejects.toThrow(/older MohoMCP plugin.*restart Moho/);
+      expect(client.isConnected()).toBe(false);
+    });
+
+    it("rejects a plugin with an older protocol version", async () => {
+      writeStatusFile(testIpcDir, true, PROTOCOL_VERSION - 1);
+      await expect(client.connect()).rejects.toThrow(/older MohoMCP plugin/);
+    });
+
+    it("rejects a plugin with a newer protocol version", async () => {
+      writeStatusFile(testIpcDir, true, PROTOCOL_VERSION + 1);
+      await expect(client.connect()).rejects.toThrow(/newer MohoMCP plugin/);
     });
 
     it("rejects when status.json has running=false", async () => {

@@ -88,6 +88,11 @@ describe("Lua IPC polling", () => {
     assert(files[dir .. "req_9.json.tmp"] == "partial", "half-written request touched")
   `));
 
+  it("advertises the IPC protocol version the bridge checks in status.json", () => runLua(serverSetup + `
+    local status = json.decode(files[dir .. "status.json"])
+    assert(status.running == true and status.protocol == 2, files[dir .. "status.json"])
+  `));
+
   it("falls back to probing small IDs when Moho has no file listing", () => runLua(serverSetup + `
     server.registerHandler("document.getInfo", function() return {ok=true} end)
     request(3)

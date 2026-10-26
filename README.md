@@ -132,6 +132,8 @@ npm run build
 2. Go to **Scripts > MohoMCP Server** to start the IPC server
 3. Start your MCP client (Claude Desktop or Claude Code) — the bridge auto-connects
 
+> **Updating:** upgrade the bridge and the plugin together, rebuild the bridge, and **restart Moho** — Moho keeps the old plugin in memory until it restarts. A bridge whose IPC protocol does not match the running plugin refuses to connect and says so (see [docs/installation.md](docs/installation.md#updating)).
+
 ### 4. Configure Claude Desktop
 
 Add to your Claude Desktop config (`claude_desktop_config.json`):
