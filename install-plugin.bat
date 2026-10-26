@@ -29,6 +29,23 @@ if not exist "%SCRIPTS%\Tool\_tool_list.txt" (
     exit /b 1
 )
 
+rem Never delete or write through links. Moho's own folders must not be links
+rem (they could lead back into a checkout); MohoMCP's own paths that are links
+rem (junctions or symlinks, e.g. Menu\MohoMCP linked to <checkout>\moho-plugin)
+rem are removed as links only, so their targets are never touched.
+call :islink "%SCRIPTS%\Menu"
+if defined ISLINK goto :linked_moho_folder
+call :islink "%SCRIPTS%\Modules"
+if defined ISLINK goto :linked_moho_folder
+call :islink "%TOOL_DEST%"
+if defined ISLINK goto :linked_moho_folder
+call :unlink "%MENU_DEST%"
+call :unlink "%MENU_DEST%\moho_mcp"
+call :unlink "%MENU_DEST%\json.lua"
+call :unlink "%MENU_DEST%\MohoMCP_Server.lua"
+call :unlink "%MODULE_DEST%"
+call :unlink "%TOOL_DEST%\MohoMCP_Poller.lua"
+
 rem Moho runs every .lua file under Scripts\Menu at startup as a menu script,
 rem so only MohoMCP_Server.lua goes there. Library modules go in Scripts\Modules.
 echo Removing library files left in the Menu folder by older versions...
@@ -74,3 +91,30 @@ echo     (it will be in the last tool group)
 echo  4. While the tool is selected, the server polls for requests
 echo.
 pause
+exit /b 0
+
+:linked_moho_folder
+echo.
+echo ERROR: A Moho Scripts folder (Menu, Modules or Tool) is a link. It could lead
+echo back into this checkout, so the installer will not write into it.
+echo.
+pause
+exit /b 1
+
+rem Sets ISLINK when %1 is a junction or symbolic link (reparse point: the
+rem 9th attribute letter is "l").
+:islink
+set "ISLINK="
+set "ATTR=%~a1"
+if not defined ATTR exit /b 0
+if "%ATTR:~8,1%"=="l" set "ISLINK=1"
+exit /b 0
+
+rem Removes %1 if, and only if, it is a link: rmdir without /S removes a
+rem directory junction/symlink itself; del removes a file symlink itself.
+:unlink
+call :islink "%~1"
+if not defined ISLINK exit /b 0
+if "%ATTR:~0,1%"=="d" (rmdir "%~1") else (del /Q "%~1")
+echo   unlinked %~1
+exit /b 0

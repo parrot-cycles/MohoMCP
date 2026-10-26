@@ -71,3 +71,84 @@ describe.skipIf(process.platform === "win32")("install-plugin.sh", () => {
     }
   });
 });
+
+// A setup where Moho's folders link back into a checkout must never delete or
+// overwrite the checkout. These tests run a throwaway copy of the repo so a
+// regression cannot damage the real one.
+describe.skipIf(process.platform === "win32")("install-plugin.sh with links into the checkout", () => {
+  let root = "";
+  let fakeRepo = "";
+  let scripts = "";
+
+  function snapshot(dir: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    const walk = (d: string) => {
+      for (const name of fs.readdirSync(d)) {
+        const p = path.join(d, name);
+        const st = fs.lstatSync(p);
+        if (st.isDirectory()) walk(p);
+        else out[path.relative(dir, p)] = st.isSymbolicLink() ? `link:${fs.readlinkSync(p)}` : fs.readFileSync(p, "utf8");
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  function runFake(...args: string[]) {
+    return execFileSync("bash", [path.join(fakeRepo, "install-plugin.sh"), ...args], { encoding: "utf8" });
+  }
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "moho-install-guard-"));
+    fakeRepo = path.join(root, "repo");
+    fs.mkdirSync(fakeRepo);
+    fs.copyFileSync(installer, path.join(fakeRepo, "install-plugin.sh"));
+    fs.cpSync(plugin, path.join(fakeRepo, "moho-plugin"), { recursive: true });
+    scripts = path.join(root, "Scripts");
+    fs.mkdirSync(path.join(scripts, "Menu"), { recursive: true });
+    fs.mkdirSync(path.join(scripts, "Tool"), { recursive: true });
+    fs.writeFileSync(path.join(scripts, "Tool", "_tool_list.txt"), "tool\tlm_select_points\t...\n");
+    // The dangerous layout: the whole Menu/MohoMCP folder is a link to <repo>/moho-plugin.
+    fs.symlinkSync(path.join(fakeRepo, "moho-plugin"), path.join(scripts, "Menu", "MohoMCP"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  for (const mode of ["--link", "copy"]) {
+    it(`${mode}: replaces a directory-symlinked Menu/MohoMCP without touching the checkout`, () => {
+      const before = snapshot(fakeRepo);
+      runFake(...(mode === "--link" ? ["--link", scripts] : [scripts]));
+      expect(snapshot(fakeRepo)).toEqual(before);
+      const menu = path.join(scripts, "Menu", "MohoMCP");
+      expect(fs.lstatSync(menu).isSymbolicLink()).toBe(false);
+      expect(fs.readdirSync(menu)).toEqual(["MohoMCP_Server.lua"]);
+      const server = path.join(menu, "MohoMCP_Server.lua");
+      if (mode === "--link") {
+        expect(fs.readlinkSync(server)).toBe(path.join(fs.realpathSync(fakeRepo), "moho-plugin", "MohoMCP_Server.lua"));
+      } else {
+        expect(fs.lstatSync(server).isSymbolicLink()).toBe(false);
+      }
+    });
+  }
+
+  it("refuses when a Moho folder it writes into resolves into the checkout", () => {
+    fs.symlinkSync(path.join(fakeRepo, "moho-plugin"), path.join(scripts, "Modules"));
+    const before = snapshot(fakeRepo);
+    expect(() => runFake("--link", scripts)).toThrow(/resolves into this checkout/);
+    expect(snapshot(fakeRepo)).toEqual(before);
+  });
+
+  it("unlinks a file symlink at a destination instead of writing through it", () => {
+    fs.rmSync(path.join(scripts, "Menu", "MohoMCP"));
+    fs.mkdirSync(path.join(scripts, "Menu", "MohoMCP"));
+    fs.symlinkSync(path.join(fakeRepo, "moho-plugin", "MohoMCP_Poller.lua"), path.join(scripts, "Tool", "MohoMCP_Poller.lua"));
+    fs.symlinkSync(path.join(fakeRepo, "moho-plugin", "moho_mcp"), path.join(scripts, "Menu", "MohoMCP", "moho_mcp"));
+    const before = snapshot(fakeRepo);
+    runFake(scripts);
+    expect(snapshot(fakeRepo)).toEqual(before);
+    expect(fs.lstatSync(path.join(scripts, "Tool", "MohoMCP_Poller.lua")).isSymbolicLink()).toBe(false);
+    expect(fs.existsSync(path.join(scripts, "Menu", "MohoMCP", "moho_mcp"))).toBe(false);
+  });
+});
