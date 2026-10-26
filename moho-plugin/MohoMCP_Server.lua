@@ -108,10 +108,12 @@ local function loadModules(baseDir)
 	-- Load tool handlers
 	local toolModules = {
 		{ name = "moho_mcp.tools.document",  methods = { "document.getInfo", "document.getLayers", "document.setFrame", "document.screenshot" } },
-		{ name = "moho_mcp.tools.layer",     methods = { "layer.getProperties", "layer.getChildren", "layer.getBones", "layer.setTransform", "layer.setVisibility", "layer.setOpacity", "layer.setName", "layer.selectLayer" } },
-		{ name = "moho_mcp.tools.bone",      methods = { "bone.getProperties", "bone.setTransform", "bone.selectBone" } },
+		{ name = "moho_mcp.tools.layer",     methods = { "layer.getProperties", "layer.getChildren", "layer.getBones", "layer.setTransform", "layer.setVisibility", "layer.setOpacity", "layer.setName", "layer.selectLayer", "layer.create" } },
+		{ name = "moho_mcp.tools.bone",      methods = { "bone.getProperties", "bone.setTransform", "bone.selectBone", "bone.create" } },
 		{ name = "moho_mcp.tools.animation", methods = { "animation.getKeyframes", "animation.getFrameState", "animation.setKeyframe", "animation.deleteKeyframe", "animation.setInterpolation" } },
 		{ name = "moho_mcp.tools.mesh",      methods = { "mesh.getPoints", "mesh.getShapes" } },
+		{ name = "moho_mcp.tools.shape",     methods = { "shape.draw" } },
+		{ name = "moho_mcp.tools.script",    methods = { "lua.run" } },
 		{ name = "moho_mcp.tools.batch",     methods = { "batch.execute" } },
 	}
 

@@ -340,4 +340,108 @@ function bone.selectBone(moho, params)
     }
 end
 
+
+--- Create a bone in a bone layer's rest pose (frame 0).
+-- API follows Scripts/Tool/lm_add_bone.lua:212-257 and
+-- Scripts/Tool/lm_sketch_bones.lua:266-325: PrepUndo(layer, true), SetDirty,
+-- skel:AddBone, fParent/fAnimParent, parent fRestMatrix inverse, fAnimPos,
+-- fLength, fAnimAngle, fPos/fTemp*, bone:SetName, skel:BoneID, UpdateBoneMatrix.
+-- @param params table { layer?: number|string, layerId?: number, name: string,
+--   origin: [x, y] (layer coordinates), length: number, angle?: number (radians),
+--   parent?: number (bone ID) | string (bone name) }
+-- @return table { layerId, boneId, name, parentId }
+function bone.create(moho, params)
+    local edit = require("moho_mcp.edit")
+    if type(params.name) ~= "string" or params.name == "" then
+        return nil, "name must be a non-empty string"
+    end
+    local origin, oerr = edit.point(params.origin, "origin")
+    if not origin then return nil, oerr end
+    if type(params.length) ~= "number" or params.length < 0 then
+        return nil, "length must be a non-negative number"
+    end
+    local angle = params.angle or 0
+    if type(angle) ~= "number" then
+        return nil, "angle must be a number (radians)"
+    end
+
+    local ref = params.layer
+    if ref == nil then ref = params.layerId end
+    local lyr, lerr = edit.findLayer(moho, ref)
+    if not lyr then return nil, lerr end
+    local isBone = false
+    pcall(function() isBone = lyr:IsBoneType() end)
+    if not isBone then
+        return nil, "Layer '" .. tostring(lyr:Name()) .. "' is not a bone layer"
+    end
+    local skel = moho:LayerAsBone(lyr):Skeleton()
+    if skel == nil then
+        return nil, "Failed to get skeleton from bone layer"
+    end
+
+    local parentID = -1
+    if params.parent ~= nil then
+        if type(params.parent) == "number" then
+            if params.parent < 0 or params.parent >= skel:CountBones() then
+                return nil, "parent bone ID " .. tostring(params.parent) .. " out of range"
+            end
+            parentID = params.parent
+        elseif type(params.parent) == "string" then
+            for i = 0, skel:CountBones() - 1 do
+                if skel:Bone(i):Name() == params.parent then
+                    parentID = i
+                    break
+                end
+            end
+            if parentID < 0 then
+                return nil, "parent bone '" .. params.parent .. "' not found"
+            end
+        else
+            return nil, "parent must be a bone ID (number) or name (string)"
+        end
+    end
+
+    edit.begin(moho, lyr, true)
+
+    local base = LM.Vector2:new_local()
+    local tip = LM.Vector2:new_local()
+    base:Set(origin.x, origin.y)
+    tip:Set(origin.x + params.length * math.cos(angle), origin.y + params.length * math.sin(angle))
+    if parentID >= 0 then
+        -- Express the bone in its parent's coordinate system.
+        local inverseM = LM.Matrix:new_local()
+        inverseM:Set(skel:Bone(parentID).fRestMatrix)
+        inverseM:Invert()
+        inverseM:Transform(base)
+        inverseM:Transform(tip)
+    end
+
+    local b = skel:AddBone(0)
+    b.fParent = parentID
+    b.fAnimParent:SetValue(0, parentID)
+    b.fAnimPos:SetValue(0, base)
+    b.fLength = params.length
+    local localAngle = math.atan(tip.y - base.y, tip.x - base.x)
+    if params.length == 0 then localAngle = angle end
+    b.fAngle = localAngle
+    b.fAnimAngle:SetValue(0, localAngle)
+    b.fPos:Set(b.fAnimPos:GetValue(0))
+    b.fTempPos:Set(b.fPos)
+    b.fTempLength = b.fLength
+    b.fTempAngle = b.fAngle
+    b:SetName(params.name)
+
+    local boneId = skel:BoneID(b)
+    skel:UpdateBoneMatrix(boneId)
+
+    edit.finish()
+
+    return {
+        layerId  = edit.layerId(moho, lyr),
+        boneId   = boneId,
+        name     = b:Name(),
+        parentId = parentID,
+    }
+end
+
 return bone

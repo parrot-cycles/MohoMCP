@@ -343,6 +343,13 @@ function server.poll(moho)
     if not isRunning or isPolling then return end
     isPolling = true
     local ok, err = pcall(pollRequests, moho)
+    -- Write handlers ask for a UI refresh via moho_mcp.edit; do it once,
+    -- still under the guard, so nested DrawMe/IsEnabled calls return early.
+    local edit = package.loaded["moho_mcp.edit"]
+    if type(edit) == "table" and edit.uiDirty then
+        edit.uiDirty = false
+        pcall(function() moho:UpdateUI() end)
+    end
     isPolling = false
     if not ok then error(err) end
 end

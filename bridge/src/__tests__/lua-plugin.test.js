@@ -15,6 +15,9 @@ function runLua(body) {
     jsonSource: "json.lua", protocolSource: "moho_mcp/protocol.lua",
     validatorSource: "moho_mcp/validator.lua", serverSource: "moho_mcp/server.lua",
     documentSource: "moho_mcp/tools/document.lua", animationSource: "moho_mcp/tools/animation.lua",
+    editSource: "moho_mcp/edit.lua", layerSource: "moho_mcp/tools/layer.lua",
+    boneSource: "moho_mcp/tools/bone.lua", shapeSource: "moho_mcp/tools/shape.lua",
+    scriptSource: "moho_mcp/tools/script.lua", batchSource: "moho_mcp/tools/batch.lua",
   })) {
     lua.lua_pushstring(L, to_luastring(fs.readFileSync(path.join(plugin, relative), "utf8")));
     lua.lua_setglobal(L, to_luastring(name));
@@ -187,5 +190,351 @@ describe("Lua animation keyframes", () => {
     assert(result.keyframes[1].interpolation == "linear")
     assert(result.keyframes[2].interpolation == "smooth")
     assert(result.keyframes[3].interpolation == "step")
+  `));
+});
+
+// ---------------------------------------------------------------------------
+// Creation tools against a stubbed Moho API (shapes mirror the bundled scripts)
+// ---------------------------------------------------------------------------
+
+const fakeMoho = `
+json = assert(load(jsonSource))()
+MOHO = {LT_VECTOR=1, LT_BONE=2, LT_GROUP=3, SMOOTH=0.4, PEAKED=0}
+local function vec(x, y)
+  local v = {x=x or 0, y=y or 0}
+  function v:Set(a, b) if type(a) == "table" then self.x, self.y = a.x, a.y else self.x, self.y = a, b end end
+  return v
+end
+LM = {
+  Vector2 = {new_local=function() return vec() end},
+  ColorVector = {new_local=function()
+    local c = {}
+    function c:Set(r, g, b, a) self.r, self.g, self.b, self.a = r, g, b, a end
+    function c:AsColorStruct()
+      local function b(v) return math.floor(v * 255 + 0.5) end
+      return {r=b(self.r), g=b(self.g), b=b(self.b), a=b(self.a)}
+    end
+    return c
+  end},
+  -- Translation-only matrices are enough to check parent-space conversion.
+  Matrix = {new_local=function()
+    local m = {ox=0, oy=0}
+    function m:Set(o) self.ox, self.oy = o.ox, o.oy end
+    function m:Invert() self.ox, self.oy = -self.ox, -self.oy end
+    function m:Transform(v) v.x, v.y = v.x + self.ox, v.y + self.oy end
+    return m
+  end},
+}
+local function chan(v)
+  return {v=v, SetValue=function(self, f, val) self.v, self.frame = val, f end,
+          GetValue=function(self) return self.v end}
+end
+calls = {}
+local function log(s) calls[#calls + 1] = s end
+
+local function newMesh()
+  local m = {points={}, shapes={}}
+  local function add(v)
+    m.points[#m.points + 1] = {x=v.x, y=v.y, fSelected=false,
+      SetCurvature=function(self, c, f) self.curvature = c end}
+  end
+  function m:CountPoints() return #self.points end
+  function m:Point(i) return self.points[i + 1] end
+  function m:AddLonePoint(v, f) log("AddLonePoint"); add(v) end
+  function m:AppendPoint(v, f) add(v) end
+  function m:WeldPoints(a, b, f) log("WeldPoints " .. a .. " " .. b); table.remove(self.points, a + 1) end
+  function m:SelectNone() for _, p in ipairs(self.points) do p.fSelected = false end end
+  function m:SelectConnected() log("SelectConnected") end
+  function m:Shape(i) return self.shapes[i + 1] end
+  function m:CountShapes() return #self.shapes end
+  return m
+end
+
+local nextId = 0
+local function newLayer(name, lt)
+  local l = {name=name, lt=lt, id=nextId, children={}}
+  nextId = nextId + 1
+  if lt == MOHO.LT_VECTOR then l.mesh = newMesh() end
+  function l:Name() return self.name end
+  function l:SetName(n) self.name = n end
+  function l:LayerType() return self.lt end
+  function l:IsGroupType() return self.lt ~= MOHO.LT_VECTOR end
+  function l:IsBoneType() return self.lt == MOHO.LT_BONE end
+  function l:CountLayers() return #self.children end
+  function l:Layer(i) return self.children[i + 1] end
+  return l
+end
+
+local function newSkeleton()
+  local s = {bones={}}
+  function s:CountBones() return #self.bones end
+  function s:Bone(i) return self.bones[i + 1] end
+  function s:BoneID(b) for i, x in ipairs(self.bones) do if x == b then return i - 1 end end return -1 end
+  function s:UpdateBoneMatrix(id) log("UpdateBoneMatrix " .. id) end
+  function s:AddBone(f)
+    local b = {fParent=-1, fAnimParent=chan(-1), fAnimPos=chan(vec()), fAnimAngle=chan(0),
+               fPos=vec(), fTempPos=vec(), fLength=0, fAngle=0, fRestMatrix={ox=0, oy=0}}
+    function b:SetName(n) self.name = n end
+    function b:Name() return self.name end
+    self.bones[#self.bones + 1] = b
+    return b
+  end
+  return s
+end
+
+local root = {}
+doc = {}
+function doc:CountLayers() return #root end
+function doc:Layer(i) return root[i + 1] end
+local all = {}
+function doc:LayerByAbsoluteID(id) return all[id] end
+function doc:LayerAbsoluteID(l) return l and l.id or -1 end
+function doc:PrepUndo(l, extra) log("PrepUndo " .. (l and l.name or "nil") .. (extra and " true" or "")) end
+function doc:SetDirty() log("SetDirty") end
+function doc:Height() return 720 end
+
+local function addRoot(name, lt)
+  local l = newLayer(name, lt); root[#root + 1] = l; all[l.id] = l; return l
+end
+art = addRoot("Art", MOHO.LT_VECTOR)
+rig = addRoot("Rig", MOHO.LT_BONE)
+rig.skel = newSkeleton()
+local hip = rig.skel:AddBone(0); hip.name = "hip"; hip.fRestMatrix = {ox=1, oy=0}
+sketch = newLayer("Sketch", MOHO.LT_VECTOR); all[sketch.id] = sketch
+rig.children[1] = sketch
+
+moho = {document=doc, layer=art, uiUpdates=0}
+function moho:SetSelLayer(l) log("SetSelLayer " .. l.name); self.layer = l end
+function moho:Mesh() return self.layer.mesh end
+function moho:LayerAsGroup(l) return l end
+function moho:LayerAsBone(l) return {Skeleton=function() return l.skel end} end
+function moho:UpdateUI() self.uiUpdates = self.uiUpdates + 1 end
+function moho:CreateNewLayer(lt, flag)
+  log("CreateNewLayer"); local l = addRoot("Layer " .. nextId, lt); self.layer = l; return l
+end
+function moho:PlaceLayerInGroup(l, g, a, b)
+  for i, x in ipairs(root) do if x == l then table.remove(root, i) break end end
+  g.children[#g.children + 1] = l
+end
+function moho:CreateShape(fill, b, f)
+  local mesh = self.layer.mesh
+  local sel = {}
+  for i, p in ipairs(mesh.points) do if p.fSelected then sel[#sel + 1] = i - 1 end end
+  local shape = {fHasFill=fill, fHasOutline=true, points=sel,
+    fMyStyle={fFillCol=chan(), fLineCol=chan(), fLineWidth=0}}
+  function shape:MakePlain() self.plain = true end
+  mesh.shapes[#mesh.shapes + 1] = shape
+  return #mesh.shapes - 1
+end
+
+package.preload["moho_mcp.edit"] = function() return assert(load(editSource))() end
+edit = require("moho_mcp.edit")
+layerTools = assert(load(layerSource))()
+boneTools = assert(load(boneSource))()
+shapeTools = assert(load(shapeSource))()
+scriptTools = assert(load(scriptSource))()
+function indexOf(s) for i, c in ipairs(calls) do if c == s then return i end end return nil end
+`;
+
+describe("Lua layer.create", () => {
+  it("creates a named vector layer inside a parent group as one undo step", () => runLua(fakeMoho + `
+    local r = assert(layerTools.create(moho, {type="vector", name="Face", parent="Rig"}))
+    assert(r.name == "Face" and r.type == "vector" and r.parentId == rig.id)
+    assert(doc:LayerByAbsoluteID(r.layerId):Name() == "Face")
+    assert(rig.children[2].name == "Face", "not placed in the parent group")
+    assert(indexOf("PrepUndo nil") < indexOf("CreateNewLayer"), "undo must be prepared first")
+    assert(indexOf("SetDirty"))
+    assert(edit.uiDirty == true)
+  `));
+
+  it("creates group and bone layers and rejects other types or non-group parents", () => runLua(fakeMoho + `
+    assert(layerTools.create(moho, {type="group", name="G"}).type == "group")
+    assert(layerTools.create(moho, {type="bone", name="B"}).type == "bone")
+    local r, err = layerTools.create(moho, {type="image", name="I"})
+    assert(r == nil and err:find("type must be"))
+    r, err = layerTools.create(moho, {type="vector", name="X", parent="Art"})
+    assert(r == nil and err:find("not a group"), err)
+    r, err = layerTools.create(moho, {type="vector", name="X", parent=999})
+    assert(r == nil and err:find("not found"), err)
+    assert(indexOf("CreateNewLayer") and #calls == 6, "rejected calls must not touch the document")
+  `));
+});
+
+describe("Lua shape.draw", () => {
+  it("draws a filled closed polygon in a named layer without grabbing selected points", () => runLua(fakeMoho + `
+    local m = sketch.mesh
+    m.points[1] = {x=9, y=9, fSelected=true, SetCurvature=function() end}
+    local r = assert(shapeTools.draw(moho, {layer="Sketch", closed=true,
+      points={{0,0},{1,0},{0.5,1}}, fill={r=1, g=0, b=0}}))
+    assert(moho.layer == sketch and indexOf("SetSelLayer Sketch"))
+    assert(indexOf("PrepUndo Sketch") and indexOf("SetDirty"))
+    assert(#m.points == 4, "closing point must be welded away")
+    assert(indexOf("WeldPoints 4 1"))
+    assert(r.layerId == sketch.id and r.shapeId == 0 and r.closed)
+    assert(table.concat(r.pointIds, ",") == "1,2,3")
+    local shp = m.shapes[1]
+    assert(table.concat(shp.points, ",") == "1,2,3", "shape used other points: " .. table.concat(shp.points, ","))
+    assert(shp.fHasFill and not shp.fHasOutline and shp.plain)
+    local c = shp.fMyStyle.fFillCol.v
+    assert(c.r == 255 and c.g == 0 and c.b == 0 and c.a == 255)
+    assert(r.hasFill == true and r.hasOutline == false)
+    assert(m.points[2].curvature == MOHO.PEAKED)
+    assert(edit.uiDirty)
+  `));
+
+  it("draws a smooth open stroke with 0-255 colors and pixel width", () => runLua(fakeMoho + `
+    local r = assert(shapeTools.draw(moho, {points={{0,0},{1,1},{2,0}}, smooth=true,
+      stroke={r=0, g=128, b=255, a=255}, strokeWidth=7.2}))
+    assert(r.layerId == art.id and not r.closed and r.hasOutline and not r.hasFill)
+    assert(indexOf("SetSelLayer Art") == nil, "current layer should be used as is")
+    local shp = art.mesh.shapes[1]
+    assert(math.abs(shp.fMyStyle.fLineWidth - 0.01) < 1e-9)
+    assert(shp.fMyStyle.fLineCol.v.g == 128)
+    assert(art.mesh.points[1].curvature == MOHO.SMOOTH)
+  `));
+
+  it("rejects bad input before touching the document", () => runLua(fakeMoho + `
+    local function fails(p, pat)
+      local r, err = shapeTools.draw(moho, p)
+      assert(r == nil and err:find(pat), tostring(err))
+    end
+    fails({points={{0,0}}}, "at least 2")
+    fails({points={{0,0},{1,1}}, closed=true}, "at least 3")
+    fails({points={{0,0},{1,1}}, fill={r=1,g=0,b=0}}, "requires closed")
+    fails({points={{0,0},{"a",1}}}, "numeric")
+    fails({points={{0,0},{1,1}}, layer="Rig"}, "not a vector layer")
+    fails({points={{0,0},{1,1}}, stroke={r=1}}, "numeric r, g, b")
+    assert(#calls == 0, "document modified: " .. table.concat(calls, ","))
+  `));
+});
+
+describe("Lua bone.create", () => {
+  it("adds a named child bone in its parent's space as one undo step", () => runLua(fakeMoho + `
+    moho.layer = rig
+    local r = assert(boneTools.create(moho, {name="thigh", origin={3, 2}, length=1, angle=math.pi/2, parent="hip"}))
+    assert(r.boneId == 1 and r.parentId == 0 and r.name == "thigh" and r.layerId == rig.id)
+    local b = rig.skel:Bone(1)
+    assert(b.fParent == 0 and b.fAnimParent.v == 0)
+    local p = b.fAnimPos.v
+    assert(math.abs(p.x - 2) < 1e-9 and math.abs(p.y - 2) < 1e-9, "origin not in parent space")
+    assert(math.abs(b.fAngle - math.pi/2) < 1e-9 and b.fAnimAngle.v == b.fAngle)
+    assert(b.fLength == 1 and b.fTempLength == 1 and b.fPos.x == p.x)
+    assert(indexOf("PrepUndo Rig true") and indexOf("SetDirty") and indexOf("UpdateBoneMatrix 1"))
+  `));
+
+  it("rejects non-bone layers and unknown parents", () => runLua(fakeMoho + `
+    local r, err = boneTools.create(moho, {layer="Art", name="b", origin={0,0}, length=1})
+    assert(r == nil and err:find("not a bone layer"))
+    r, err = boneTools.create(moho, {layer="Rig", name="b", origin={0,0}, length=1, parent="nope"})
+    assert(r == nil and err:find("not found"))
+    r, err = boneTools.create(moho, {layer=rig.id, name="b", origin={0,0}, length=1, parent=5})
+    assert(r == nil and err:find("out of range"))
+    assert(#calls == 0)
+  `));
+});
+
+describe("Lua lua.run", () => {
+  it("returns JSON-safe values, captures print, and exposes moho and the document", () => runLua(fakeMoho + `
+    local r = assert(scriptTools.run(moho, {code=[[
+      print("layers", doc:CountLayers())
+      return {name = moho.layer:Name(), list = {1, 2, 3}, co = coroutine.create(print), nan = 0/0}
+    ]]}))
+    assert(r.output == "layers\t2", r.output)
+    assert(r.result.name == "Art" and #r.result.list == 3)
+    assert(r.result.co:find("^thread"), "non-JSON values must be tostring'd")
+    local encoded = json.encode(r)
+    assert(encoded:find('"name":"Art"', 1, true), encoded)
+    assert(indexOf("PrepUndo nil") and indexOf("SetDirty"))
+    local r2 = assert(scriptTools.run(moho, {code="return 1, nil, 'x'", undo=false}))
+    assert(r2.result[1] == 1 and r2.result[2] == json.null and r2.result[3] == "x")
+  `));
+
+  it("reports Lua errors with output instead of raising", () => runLua(fakeMoho + `
+    local r, err = scriptTools.run(moho, {code="print('before'); error('boom')"})
+    assert(r == nil and err:find("boom") and err:find("before"), err)
+    r, err = scriptTools.run(moho, {code="return +"})
+    assert(r == nil and err:find("syntax"), err)
+  `));
+
+  it("aborts a runaway loop", () => runLua(fakeMoho + `
+    scriptTools.timeLimit = 0.05
+    local r, err = scriptTools.run(moho, {code="while true do end", undo=false})
+    assert(r == nil and err:find("time limit"), tostring(err))
+  `));
+});
+
+describe("Lua creation tools through the server", () => {
+  const setup = fakeMoho + `
+local files = {}
+os.getenv = function(name) if name == "TMPDIR" then return "/ipc" end end
+os.remove = function(p) files[p] = nil; return true end
+os.rename = function(a,b) files[b] = files[a]; files[a] = nil; return true end
+io = {
+  popen = function() return {close = function() end} end,
+  open = function(p, mode)
+    if mode == "r" or mode == "rb" then
+      if files[p] == nil then return nil, "not found" end
+      return {read = function() return files[p] end, close = function() end}
+    end
+    return {write = function(_, s) files[p] = s end, close = function() end}
+  end,
+}
+local protocol = assert(load(protocolSource))()
+local validator = assert(load(validatorSource))()
+local server = assert(load(serverSource))()
+package.loaded["moho_mcp.validator"] = validator
+package.loaded["moho_mcp.server"] = server
+server.init({json=json, protocol=protocol, validator=validator})
+server.registerHandler("layer.create", layerTools.create)
+server.registerHandler("shape.draw", shapeTools.draw)
+server.registerHandler("bone.create", boneTools.create)
+server.registerHandler("lua.run", scriptTools.run)
+server.registerHandler("batch.execute", assert(load(batchSource))().execute)
+assert(server.start())
+local dir = server.getInfo().ipcDir
+function call(id, method, params)
+  files[dir .. "req_" .. id .. ".json"] = json.encode({jsonrpc="2.0", id=id, method=method, params=params})
+  server.poll(moho)
+  return json.decode(assert(files[dir .. "resp_" .. id .. ".json"], "no response"))
+end
+`;
+
+  it("turns a Lua error into a JSON-RPC error and keeps serving", () => runLua(setup + `
+    local resp = call(1, "lua.run", {code="error('kaput')"})
+    assert(resp.error.code == -32603 and resp.error.message:find("kaput"), json.encode(resp))
+    resp = call(2, "lua.run", {code="return 41 + 1"})
+    assert(resp.result.result == 42)
+  `));
+
+  it("validates required params for each new method", () => runLua(setup + `
+    assert(call(1, "shape.draw", {}).error.code == -32602)
+    assert(call(2, "layer.create", {type="vector"}).error.code == -32602)
+    assert(call(3, "bone.create", {name="b", origin={0,0}}).error.code == -32602)
+    assert(call(4, "lua.run", {code=5}).error.code == -32602)
+  `));
+
+  it("refreshes the UI once per poll, under the re-entry guard", () => runLua(setup + `
+    local nested, nestedDispatch = 0, false
+    moho.UpdateUI = function(self)
+      self.uiUpdates = self.uiUpdates + 1
+      -- A request arrives and a synchronous repaint re-enters the poll hook.
+      files[dir .. "req_99.json"] = json.encode({jsonrpc="2.0", id=99, method="lua.run", params={code="return 1"}})
+      server.poll(self)
+      nestedDispatch = files[dir .. "resp_99.json"] ~= nil
+      nested = nested + 1
+    end
+    local resp = call(1, "batch.execute", {operations={
+      {method="layer.create", params={type="vector", name="Ink"}},
+      {method="shape.draw", params={layer="Ink", closed=true, points={{0,0},{1,0},{1,1}}}},
+      {method="lua.run", params={code="return moho.layer:Name()"}},
+    }})
+    assert(resp.result.summary.succeeded == 3, json.encode(resp))
+    assert(resp.result.results[3].result.result == "Ink")
+    assert(moho.uiUpdates == 1 and nested == 1, "UpdateUI calls: " .. moho.uiUpdates)
+    assert(edit.uiDirty == false)
+    assert(not nestedDispatch, "a request was dispatched from inside UpdateUI")
+    moho.UpdateUI = function() end
+    server.poll(moho)
+    assert(json.decode(files[dir .. "resp_99.json"]).result.result == 1)
   `));
 });

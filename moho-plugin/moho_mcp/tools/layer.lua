@@ -510,4 +510,66 @@ function layer.selectLayer(moho, params)
     }
 end
 
+
+--- Create a new layer.
+-- API: moho:CreateNewLayer(MOHO.LT_*, false), layer:SetName(),
+-- moho:PlaceLayerInGroup(layer, group, true, false), PrepUndo(nil)+SetDirty
+-- (Scripts/Menu/Tiling/lm_tile1.lua:142-151, Particle Effects/lm_snow.lua:45-50,79-81).
+-- @param params table { type: "vector"|"group"|"bone", name: string, parent?: number|string }
+-- @return table { layerId, name, type, parentId }
+function layer.create(moho, params)
+    local edit = require("moho_mcp.edit")
+    local M = edit.M()
+    if not M then
+        return nil, "MOHO constants unavailable"
+    end
+    local types = { vector = M.LT_VECTOR, group = M.LT_GROUP, bone = M.LT_BONE }
+    local lt = types[params.type]
+    if lt == nil then
+        return nil, "type must be one of: vector, group, bone"
+    end
+    if type(params.name) ~= "string" or params.name == "" then
+        return nil, "name must be a non-empty string"
+    end
+    if not moho or not moho.document then
+        return nil, "No active document"
+    end
+
+    local parentGroup, parentId = nil, -1
+    if params.parent ~= nil then
+        local parent, perr = edit.findLayer(moho, params.parent)
+        if not parent then return nil, perr end
+        local isGroup = false
+        pcall(function() isGroup = parent:IsGroupType() end)
+        if not isGroup then
+            return nil, "parent '" .. tostring(parent:Name()) .. "' is not a group or bone layer"
+        end
+        parentGroup = moho:LayerAsGroup(parent)
+        parentId = edit.layerId(moho, parent)
+    end
+
+    edit.begin(moho, nil)
+
+    local newLayer = moho:CreateNewLayer(lt, false)
+    if newLayer == nil then
+        return nil, "Moho did not create a " .. params.type .. " layer"
+    end
+    if newLayer:LayerType() ~= lt then
+        return nil, "Moho created a layer of a different type than " .. params.type
+    end
+    newLayer:SetName(params.name)
+    if parentGroup ~= nil then
+        moho:PlaceLayerInGroup(newLayer, parentGroup, true, false)
+    end
+
+    edit.finish()
+
+    return {
+        layerId  = edit.layerId(moho, newLayer),
+        name     = newLayer:Name(),
+        type     = params.type,
+        parentId = parentId,
+    }
+end
+
 return layer
