@@ -568,7 +568,7 @@ Draw a new shape from points in a vector layer. Points are in Moho world units: 
 | `strokeWidth` | number | No | Outline width in pixels (stored as width / document height) |
 | `smooth` | boolean | No | Smooth (curved) corners instead of sharp ones (default `false`) |
 
-Colors use channels 0–1; if any channel is above 1 the whole color is read as 0–255. `a` defaults to opaque. With neither `fill` nor `stroke`, MOHO's current style is used (closed: fill + outline; open: outline). The target layer is made current while drawing (Moho creates shapes on the current layer) and the previous current layer is restored afterwards.
+Colors use channels 0–1; if any channel is above 1 the whole color is read as 0–255. `a` defaults to opaque. With neither `fill` nor `stroke`, MOHO's current style is used (closed: fill + outline; open: outline). The target layer is made current while drawing (Moho creates shapes on the current layer) and the previous current layer is restored afterwards, also when drawing fails. The target layer's point selection is cleared: it is emptied before drawing, so other selected points cannot join the new shape, and again afterwards.
 
 **Returns:**
 ```json

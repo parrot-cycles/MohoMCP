@@ -455,6 +455,13 @@ describe("Lua shape.draw", () => {
     assert(edit.uiDirty)
   `));
 
+  it("restores the previous current layer when Moho raises mid-draw", () => runLua(fakeMoho + `
+    sketch.mesh.AppendPoint = function() error("Moho blew up") end
+    local r, err = shapeTools.draw(moho, {layer="Sketch", points={{0,0},{1,1}}})
+    assert(r == nil and err:find("Moho blew up"), tostring(err))
+    assert(moho.layer == art, "current layer left on Sketch")
+  `));
+
   it("draws a smooth open stroke with 0-255 colors and pixel width", () => runLua(fakeMoho + `
     local r = assert(shapeTools.draw(moho, {points={{0,0},{1,1},{2,0}}, smooth=true,
       stroke={r=0, g=128, b=255, a=255}, strokeWidth=7.2}))
