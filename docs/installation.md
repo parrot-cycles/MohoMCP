@@ -174,9 +174,18 @@ The bridge and MOHO communicate via JSON files in a platform-specific temp direc
 
 A background keep-alive process periodically forces MOHO viewport repaints (~4 Hz) so the Lua polling loop stays responsive even when the user isn't interacting with MOHO:
 - **Windows:** Hidden PowerShell process calling Win32 `RedrawWindow()`
-- **macOS:** a JavaScript-for-Automation helper (`osascript -l JavaScript`) that, while a request file is pending, posts a synthetic mouse-moved event to the running Moho process (`CGEventPostToPid`). The cursor does not move, focus does not change, and it works with Moho in the background or frontmost. It never launches or activates Moho and does nothing when Moho is not running. If your MCP client app has not been allowed to control the computer, macOS may ask for Accessibility permission the first time.
+- **macOS:** a JavaScript-for-Automation helper, described below.
 
-The helper uses the bridge's configured IPC directory and exits when the bridge does; disconnecting stops it and removes its script. The helper finds Moho by its bundle id (`com.lostmarble.moho`), ignores request files older than 60 s (left behind by a killed bridge), and at start checks whether it may post events; if not, the bridge logs "grant Accessibility to <app> so MohoMCP can wake Moho". The bridge also checks that Moho is running (`lsappinfo find bundleid=com.lostmarble.moho`) before connecting, before each request and while waiting, and reports "Moho is not running" instead of timing out: `status.json` keeps saying `running: true` after a crash. If that check itself cannot run, the bridge warns once and carries on.
+The helper uses the bridge's configured IPC directory and exits when the bridge does; disconnecting stops it and removes its script. The helper finds Moho by its bundle id (`com.lostmarble.moho`), ignores request files older than 60 s (left behind by a killed bridge), and at start checks whether it may post events and use Accessibility (`CGPreflightPostEventAccess`, `AXIsProcessTrusted`); if not, the bridge logs "grant Accessibility to <app> so MohoMCP can wake Moho". The bridge also checks that Moho is running (`lsappinfo find bundleid=com.lostmarble.moho`) before connecting, before each request and while waiting, and reports "Moho is not running" instead of timing out: `status.json` keeps saying `running: true` after a crash. If that check itself cannot run, the bridge warns once and carries on.
+
+### How waking works (macOS)
+
+Moho only runs Lua while it handles UI events, so a pending request needs Moho to wake up. The bridge starts one helper (`osascript -l JavaScript`) that, while a request file younger than 60 s is pending:
+
+1. **Mouse nudge (first, cheap):** posts a synthetic mouse-moved event straight to the Moho process (`CGEventPostToPid`). The cursor does not move. This wakes Moho only when the active tool repaints on mouse moves (Transform Layer, Transform Points, Add Point, Freehand do; Select Points, Curvature, Draw Shape, Select Shape and Eyedropper don't).
+2. **Menu read (fallback, works with every tool):** if the request is still pending ~300 ms later, it reads, through the Accessibility API, whether the *Start/Stop MohoMCP Server* menu item (in the menu that contains the *MohoMCP* submenu) is enabled, and repeats every ~400 ms while the request is pending. To answer, Moho validates that menu, which runs the plugin's poll. Live: ~150 ms with every tool tested. It only reads the `enabled` attribute; it never opens, clicks or presses a menu.
+
+Nothing comes to the front and focus does not change; Moho is found by its bundle id (`com.lostmarble.moho`) and is never launched or activated. **Both steps need Accessibility permission for the app that runs your MCP client** (Claude Desktop, your terminal, ...): System Settings > Privacy & Security > Accessibility. When it is missing the bridge logs `WARNING: grant Accessibility to <app> so MohoMCP can wake Moho ...`.
 
 ## Configuration
 

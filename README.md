@@ -195,7 +195,7 @@ Communication uses JSON files in the system temp directory (`%TEMP%\moho-mcp\` o
 
 MOHO only processes Lua callbacks during UI repaints. A background process periodically forces viewport redraws (~4 Hz) to keep the polling loop alive even when the user isn't interacting:
 - **Windows:** PowerShell process calling Win32 `RedrawWindow()`
-- **macOS:** a JavaScript-for-Automation helper (`osascript -l JavaScript`) that, while a request file is pending, posts a synthetic mouse-moved event to the running Moho process (`CGEventPostToPid`). The cursor does not move, focus does not change, and it works with Moho in the background or frontmost. It never launches or activates Moho and does nothing when Moho is not running. If your MCP client app has not been allowed to control the computer, macOS may ask for Accessibility permission the first time.
+- **macOS:** a JavaScript-for-Automation helper (`osascript -l JavaScript`) that, while a request file is pending, posts a mouse-moved event to Moho and, if that does not get an answer within ~300 ms, reads the enabled state of the MohoMCP Scripts menu item through the Accessibility API. Nothing comes to the front, nothing is clicked, and Moho is never launched. Both need Accessibility permission for the app that runs your MCP client. See [How waking works](docs/installation.md#how-waking-works-macos).
 
 ### Security
 
@@ -275,7 +275,7 @@ All 31 tools work on both platforms, except scene-mode screenshots, which are di
 | Full UI screenshot (`mode="full"`) | Win32 PrintWindow API | `screencapture -l` |
 | Mouse input (click, drag) | Win32 user32.dll P/Invoke | cliclick / CoreGraphics via JXA |
 | Keyboard input | Win32 keybd_event | AppleScript System Events |
-| Keep-alive (viewport refresh) | PowerShell + RedrawWindow | JXA helper posting mouse-moved events to Moho's pid |
+| Keep-alive (viewport refresh) | PowerShell + RedrawWindow | JXA helper: mouse-moved event to Moho's pid, then an Accessibility read of the MohoMCP menu item |
 | Plugin installer | `install-plugin.bat` | `install-plugin.sh` |
 
 ### Windows Requirements
