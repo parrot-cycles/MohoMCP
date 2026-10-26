@@ -929,7 +929,8 @@ export function registerTools(server: McpServer, client: MohoClient): void {
       "(tables become objects/arrays, userdata becomes a string); print() output is captured. " +
       "Lua errors come back as tool errors. Runs as one undo step unless undo is false. Chunks are stopped after ~20 s " +
       "(between Lua instructions; a single long Moho call cannot be interrupted); the bridge waits up to 30 s. " +
-      "If a call times out its edit may still have been applied: inspect the document before retrying.",
+      "If a call times out its edit may still have been applied: inspect the document before retrying. " +
+      "moho:FileNew/FileOpen/FileClose/FileRender/FileImport/FileImportImageSequence are blocked (they crash Moho from the poll).",
     {
       code: z.string().min(1).describe("Lua source to run"),
       undo: z

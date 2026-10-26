@@ -41,6 +41,14 @@ local jsonNull = function()
     return nil
 end
 
+--- The truncation marker, handed out once per result; "" afterwards so
+--- enclosing tables do not repeat it.
+local function marker(state)
+    if state.marked then return "" end
+    state.marked = true
+    return TRUNCATED
+end
+
 --- Charge `cost` bytes against the result budget; false once it is spent.
 local function charge(state, cost)
     if state.truncated then return false end
@@ -72,7 +80,7 @@ local function toJson(v, depth, state)
     elseif t == "table" then
         if state.seen[v] then return "<cycle>" end
         if depth >= MAX_DEPTH then return "<max depth>" end
-        if not charge(state, 2) then return TRUNCATED end
+        if not charge(state, 2) then return marker(state) end
         state.seen[v] = true
         local n = #v
         local count = 0
@@ -80,14 +88,20 @@ local function toJson(v, depth, state)
         local out = {}
         if count > 0 and count == n then
             for i = 1, n do
-                if state.truncated then out[#out + 1] = TRUNCATED; break end
+                if state.truncated then
+                    if not state.marked then out[#out + 1] = marker(state) end
+                    break
+                end
                 local item = toJson(v[i], depth + 1, state)
                 if item == nil then item = "nil" end
                 out[i] = item
             end
         else
             for k, val in pairs(v) do
-                if state.truncated then out[TRUNCATED] = true; break end
+                if state.truncated then
+                    if not state.marked then out[marker(state)] = true end
+                    break
+                end
                 local key = tostring(k)
                 charge(state, #key + 4)
                 local item = toJson(val, depth + 1, state)
@@ -106,9 +120,61 @@ local function toJson(v, depth, state)
         if charge(state, #str + 2) then return str end
         local room = MAX_RESULT - state.bytes - #TRUNCATED
         state.bytes = MAX_RESULT
-        if room > 0 then return str:sub(1, room) .. TRUNCATED end
-        return TRUNCATED
+        if room > 0 then return str:sub(1, room) .. marker(state) end
+        return marker(state)
     end
+end
+
+-- Document-level calls that crash Moho when made from inside the poll
+-- (live test: moho:FileNew() -> SIGSEGV in MohoView::DrawViewContents;
+-- FileRender -> SIGSEGV in ScriptInterface_FileRender). FileSave/FileSaveAs
+-- stay allowed but are untested inside the poll.
+script.BLOCKED_METHODS = {
+    "FileNew", "FileOpen", "FileClose", "FileRender", "FileImport", "FileImportImageSequence",
+}
+
+--- The table that actually holds method `name` for `obj`: the object itself
+--- (plain tables) or a table on its metatable chain (tolua++ classes keep
+--- methods in the class metatable and chain to the base class's).
+local function methodHolder(obj, name)
+    if type(obj) == "table" and rawget(obj, name) ~= nil then return obj end
+    local ok, mt = pcall(getmetatable, obj)
+    local hops = 0
+    while ok and type(mt) == "table" and hops < 16 do
+        if rawget(mt, name) ~= nil then return mt end
+        local idx = rawget(mt, "__index")
+        if type(idx) == "table" and idx ~= mt and rawget(idx, name) ~= nil then return idx end
+        ok, mt = pcall(getmetatable, mt)
+        hops = hops + 1
+    end
+    return nil
+end
+
+--- Temporarily replace the blocked methods where they live, so the real
+--- `moho` userdata can still be handed to other scripts' APIs.
+-- @return function  restores the originals (safe to call more than once)
+-- @return table  names that could not be blocked
+local function blockFileCalls(moho)
+    local saved, missed = {}, {}
+    for _, name in ipairs(script.BLOCKED_METHODS) do
+        local holder = moho ~= nil and methodHolder(moho, name) or nil
+        if holder then
+            saved[#saved + 1] = { holder, name, rawget(holder, name) }
+            rawset(holder, name, function()
+                error("moho:" .. name .. "() is blocked in lua_run: Moho crashes when it creates, opens, "
+                    .. "closes, imports or renders documents from inside the MohoMCP poll", 2)
+            end)
+        else
+            missed[#missed + 1] = name
+        end
+    end
+    local function restore()
+        for i = #saved, 1, -1 do
+            local entry = saved[i]
+            pcall(rawset, entry[1], entry[2], entry[3])
+        end
+    end
+    return restore, missed
 end
 
 --- Run a Lua chunk.
@@ -152,6 +218,19 @@ function script.run(moho, params)
         return nil, "Lua syntax error: " .. tostring(loadErr)
     end
 
+    -- Block document-level calls for the duration of the chunk. If a method
+    -- could not be intercepted (unexpected binding layout), refuse chunks that
+    -- mention it rather than risk a crash.
+    local unblock, missed = blockFileCalls(moho)
+    for _, name in ipairs(missed) do
+        local present = false
+        pcall(function() present = moho[name] ~= nil end)
+        if present and code:find(name, 1, true) then
+            unblock()
+            return nil, "moho:" .. name .. "() is blocked in lua_run (it crashes Moho inside the MohoMCP poll)"
+        end
+    end
+
     -- Changes made by the chunk are one undoable step, like a menu script
     -- (Scripts/Menu/Particle Effects/lm_snow.lua:45-46).
     if params.undo ~= false and doc then
@@ -180,9 +259,11 @@ function script.run(moho, params)
     local ranOk, packed = pcall(function()
         local r = table.pack(pcall(chunk))
         active = false
+        unblock()
         return r
     end)
     active = false
+    unblock()
     if hookSet then
         if oldHook then
             pcall(debug.sethook, oldHook, oldMask, oldCount)
@@ -206,7 +287,7 @@ function script.run(moho, params)
         return nil, msg
     end
 
-    local state = { seen = {}, bytes = 0, truncated = false }
+    local state = { seen = {}, bytes = 0, truncated = false, marked = false }
     local result
     if packed.n <= 1 then
         result = jsonNull()
@@ -215,7 +296,10 @@ function script.run(moho, params)
     else
         result = {}
         for i = 2, packed.n do
-            if state.truncated then result[#result + 1] = TRUNCATED; break end
+            if state.truncated then
+                if not state.marked then result[#result + 1] = marker(state) end
+                break
+            end
             local item = toJson(packed[i], 0, state)
             if item == nil then item = "nil" end
             result[i - 1] = item

@@ -627,6 +627,8 @@ print("top-level layers:", n)
 return { layers = n, current = moho.layer:Name() }
 ```
 
+**Blocked inside a chunk:** `moho:FileNew`, `FileOpen`, `FileClose`, `FileRender`, `FileImport` and `FileImportImageSequence` raise a Lua error for the duration of the chunk: called from inside the MohoMCP poll they crash Moho (seen live for `FileNew` and `FileRender`). They are blocked on Moho's class, so the real `moho` object can still be passed to other scripts (for example `SS_SVGImport:Run(moho)`). `FileSave` / `FileSaveAs` are allowed but untested inside the poll.
+
 > `lua_run` can do anything a Moho script can, including file and shell access through `io`/`os`.
 
 ---

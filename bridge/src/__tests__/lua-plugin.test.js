@@ -535,11 +535,58 @@ describe("Lua lua.run", () => {
       return t
     ]]}))
     assert(r.truncated == true)
-    assert(r.result[#r.result] == "…[truncated]", "missing marker")
+    local last = r.result[#r.result]
+    assert(last:sub(-#"…[truncated]") == "…[truncated]", "missing marker")
     local encoded = json.encode(r.result)
     assert(#encoded < 1024 * 1024 + 4096, "encoded result is " .. #encoded .. " bytes")
     local big = assert(scriptTools.run(moho, {undo=false, code="return string.rep('z', 2 * 1024 * 1024)"}))
     assert(#big.result <= 1024 * 1024 and big.result:sub(-#"…[truncated]") == "…[truncated]")
+  `));
+
+  it("blocks document-level File calls on moho's class during the chunk only", () => runLua(fakeMoho + `
+    -- Methods live on a class table reached through the metatable, like tolua++.
+    local calls = {}
+    local class = {}
+    for _, n in ipairs({"FileNew","FileOpen","FileClose","FileRender","FileImport","FileImportImageSequence","FileSave"}) do
+      class[n] = function(self) calls[#calls + 1] = n; return n end
+    end
+    class.__index = class
+    local base = getmetatable(moho)
+    setmetatable(moho, class)
+    local seen
+    _G.SomeImporter = {Run = function(_, m) seen = m; return m:FileSave() end}
+    for _, n in ipairs({"FileNew","FileOpen","FileClose","FileRender","FileImport","FileImportImageSequence"}) do
+      local r, err = scriptTools.run(moho, {undo=false, code="return moho:" .. n .. "('/tmp/x')"})
+      assert(r == nil and err:find("moho:" .. n .. "() is blocked", 1, true), tostring(err))
+    end
+    assert(#calls == 0, "a blocked method reached Moho: " .. table.concat(calls, ","))
+    -- The real object is passed through unchanged and other methods still work.
+    local r = assert(scriptTools.run(moho, {undo=false, code="return SomeImporter:Run(moho)"}))
+    assert(rawequal(seen, moho) and r.result == "FileSave")
+    -- Restored after the chunk, also after an error and after a timeout.
+    assert(moho:FileNew() == "FileNew")
+    scriptTools.run(moho, {undo=false, code="error('x')"})
+    assert(moho:FileRender() == "FileRender")
+    scriptTools.timeLimit = 0.05
+    scriptTools.run(moho, {undo=false, code="while true do end"})
+    assert(moho:FileOpen() == "FileOpen")
+    setmetatable(moho, base)
+  `));
+
+  it("emits the result truncation marker once, even when nested", () => runLua(fakeMoho + `
+    local r = assert(scriptTools.run(moho, {undo=false, code=[[
+      local outer = {}
+      for i = 1, 3 do
+        local inner = {}
+        for j = 1, 600 do inner[j] = string.rep("q", 1000) end
+        outer[i] = inner
+      end
+      return outer, "after"
+    ]]}))
+    local encoded = json.encode(r.result)
+    local _, n = encoded:gsub("…%[truncated%]", "")
+    assert(n == 1, "marker appears " .. n .. " times")
+    assert(r.truncated == true)
   `));
 
   it("aborts a runaway loop", () => runLua(fakeMoho + `
