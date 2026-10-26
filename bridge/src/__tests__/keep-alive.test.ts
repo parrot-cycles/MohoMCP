@@ -6,7 +6,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { config } from "../config.js";
 import {
-  startKeepAlive, stopKeepAlive, MACOS_KEEPALIVE_JXA, MOHO_BUNDLE_ID, NO_EVENT_ACCESS_TOKEN, noEventAccessMessage,
+  startKeepAlive, stopKeepAlive, MACOS_KEEPALIVE_JXA, MOHO_BUNDLE_ID, NO_EVENT_ACCESS_TOKEN, NO_AX_ACCESS_TOKEN,
+  noEventAccessMessage, MOHO_SERVER_MENU_ITEM, MOHO_MENU_FOLDER,
 } from "../keep-alive.js";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
@@ -54,7 +55,8 @@ describe("keep-alive lifecycle", () => {
     expect(MACOS_KEEPALIVE_JXA).toContain("CGEventCreateMouseEvent(null, 5,");
     expect(MACOS_KEEPALIVE_JXA).toContain("runningApplications");
     expect(MACOS_KEEPALIVE_JXA).toContain("bundleIdentifier");
-    expect(MACOS_KEEPALIVE_JXA).toContain("var bundleId = argv[1] || 'com.lostmarble.moho';");
+    expect(MACOS_KEEPALIVE_JXA).toContain('var BUNDLE_ID = "com.lostmarble.moho";');
+    expect(MACOS_KEEPALIVE_JXA).toContain("var bundleId = argv[1] || BUNDLE_ID;");
     expect(MACOS_KEEPALIVE_JXA).toContain("MAX_REQUEST_AGE = 60");
     expect(MACOS_KEEPALIVE_JXA).toContain("/^req_\\d+\\.json$/");
     expect(MACOS_KEEPALIVE_JXA).not.toMatch(/activate|launch|tell application|openApplication|CFRelease/i);
@@ -70,6 +72,67 @@ describe("keep-alive lifecycle", () => {
     expect(noEventAccessMessage({ __CFBundleIdentifier: "com.anthropic.claudefordesktop" })).toMatch(
       /^grant Accessibility to com\.anthropic\.claudefordesktop .*wake Moho/,
     );
+  });
+
+  it("warns once when the helper reports it is not trusted for Accessibility", () => {
+    const stderr = new EventEmitter();
+    Object.assign(child, { stderr });
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    startKeepAlive();
+    stderr.emit("data", Buffer.from(NO_AX_ACCESS_TOKEN + "\n"));
+    stderr.emit("data", Buffer.from(NO_EVENT_ACCESS_TOKEN + "\n"));
+    const warnings = write.mock.calls.filter((c) => String(c[0]).includes("grant Accessibility"));
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("only reads the menu item: no AX actions, clicks or key events", () => {
+    expect(MACOS_KEEPALIVE_JXA).toContain("AXUIElementCopyAttributeValue");
+    expect(MACOS_KEEPALIVE_JXA).toContain("'AXEnabled'");
+    expect(MACOS_KEEPALIVE_JXA).not.toMatch(/PerformAction|AXPress|SetAttributeValue|click|keystroke|CGEventCreateKeyboardEvent/i);
+    // The menu-bar item is found by content, not by the localized "Scripts" title.
+    expect(MACOS_KEEPALIVE_JXA).not.toContain("Scripts");
+  });
+
+  it("looks up the server menu item by the plugin's own UILabel", () => {
+    const lua = fs.readFileSync(path.resolve(__dirname, "../../../moho-plugin/MohoMCP_Server.lua"), "utf8");
+    expect(lua).toContain(`return "${MOHO_SERVER_MENU_ITEM}"`);
+    expect(MOHO_MENU_FOLDER).toBe("MohoMCP");
+  });
+
+  describe("wake scheduling (real helper code, stubbed ObjC)", () => {
+    type State = Record<string, number | boolean>;
+    const { wakeStep } = new Function(
+      "ObjC", "$", "Ref", "delay", "console",
+      `${MACOS_KEEPALIVE_JXA}\nreturn { wakeStep };`,
+    )({ import() {}, bindFunction() {}, unwrap: (x: unknown) => x, deepUnwrap: (x: unknown) => x }, {}, () => [], () => {}, console) as {
+      wakeStep: (s: State, now: number, pending: boolean, a: { nudge(): void; axWake(): void }) => void;
+    };
+
+    function simulate(pendingAt: (t: number) => boolean, until: number) {
+      const log: string[] = [];
+      const state: State = {};
+      for (let t = 0; t <= until; t += 100) {
+        wakeStep(state, t, pendingAt(t), {
+          nudge: () => log.push(`nudge@${t}`),
+          axWake: () => log.push(`ax@${t}`),
+        });
+      }
+      return log;
+    }
+
+    it("nudges first and reads the menu only if the request is still pending 300 ms later", () => {
+      expect(simulate(() => true, 1000)).toEqual([
+        "nudge@0", "nudge@300", "ax@300", "nudge@600", "ax@700", "nudge@900",
+      ]);
+    });
+
+    it("never reads the menu for requests answered within 300 ms", () => {
+      expect(simulate((t) => t < 200 || (t >= 500 && t < 700), 1000)).toEqual(["nudge@0", "nudge@500"]);
+    });
+
+    it("does nothing while no request is pending", () => {
+      expect(simulate(() => false, 1000)).toEqual([]);
+    });
   });
 
   it("does not spawn duplicate helpers and cleans up on disconnect", () => {

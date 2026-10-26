@@ -90,4 +90,23 @@ describe.skipIf(process.platform !== "darwin")("macOS JXA keep-alive helper", ()
     if (stillAlive) process.kill(pid);
     expect(stillAlive).toBe(false);
   }, 10000);
+
+  it("finds a menu item by title in a real app's menus, read-only", () => {
+    const finder = selftest("com.apple.finder").pid;
+    expect(finder).toBeGreaterThan(0);
+    const run = (...a: string[]) =>
+      JSON.parse(execFileSync("osascript", ["-l", "JavaScript", script, ...a], { encoding: "utf8" }));
+    const menus = run("--menus", String(finder)) as Array<Array<{ title: string; sub: string[] }>>;
+    const pick = menus.flat().find((it) => it.title && it.sub.some((t) => t));
+    expect(pick, "no menu item with a submenu in Finder").toBeTruthy();
+    const subTitle = pick!.sub.find((t) => t)!;
+    const found = run("--find", String(finder), pick!.title, subTitle);
+    expect(found.found).toBe(true);
+    expect(found.title).toBe(subTitle);
+    expect(typeof found.enabled).toBe("boolean");
+    expect(run("--find", String(finder), pick!.title, "No Such Item 123").found).toBe(false);
+    // The wake read caches the element and reuses it on the next tick.
+    expect(run("--wake", String(finder), pick!.title, subTitle)).toEqual({ first: true, cached: true, second: true });
+    expect(run("--wake", String(finder), pick!.title, "No Such Item 123")).toEqual({ first: false, cached: false, second: false });
+  });
 });

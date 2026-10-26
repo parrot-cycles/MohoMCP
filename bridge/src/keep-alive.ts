@@ -23,6 +23,7 @@ import os from "node:os";
 import { config } from "./config.js";
 
 let keepAliveProcess: ChildProcess | null = null;
+let warnedAccess = false;
 let scriptPath: string | null = null;
 
 // PowerShell script that forces MOHO viewport repaints via Win32 API.
@@ -85,30 +86,52 @@ while ($true) {
 }
 `;
 
-// macOS helper (JXA). `tell application "Moho" to activate` did nothing when
-// Moho was already frontmost and relaunched Moho after a crash; a mouseMoved
-// event posted to Moho's pid was answered 10/10 in ~280 ms in a live test.
-// Event type 5 = kCGEventMouseMoved, button 0 = kCGMouseButtonLeft. The point
-// is arbitrary (the cursor does not move). Do not CFRelease the event: the
-// JXA bridge owns it and a manual release crashes osascript.
-// Moho is found by bundle id, not by executable name.
-// Request files older than MAX_REQUEST_AGE seconds are orphans of a killed
-// bridge and are ignored, so helpers don't nudge Moho forever.
-// At start the helper checks CGPreflightPostEventAccess (bound by hand: it is
-// not in JXA's CoreGraphics bridge) and prints NO_EVENT_ACCESS_TOKEN to stderr
-// (console.log) when posting events is not permitted.
-// Arguments: <ipcDir> [bundleId] [bridgePid];
-// "--selftest <dir> <bundleId> <pid>" runs each step once and prints JSON
-// (used by tests, never posts to Moho). The loop exits when the bridge is gone.
+// macOS helper (JXA). Waking Moho so it polls, without bringing it forward:
+//
+// 1. Post a synthetic mouseMoved CGEvent to Moho's pid (cheap). It only
+//    wakes Moho when the active tool's OnMouseMoved repaints (Transform
+//    Layer/Points, Add Point, Freehand do; Select Points, Curvature, Draw
+//    Shape, Select Shape, Eyedropper don't). Event type 5 =
+//    kCGEventMouseMoved, button 0 = left; the cursor does not move. Do not
+//    CFRelease the event: the JXA bridge owns it and a release crashes.
+// 2. If the request is still pending AX_AFTER ms later, read (never press)
+//    the AXEnabled attribute of our own menu item through the Accessibility
+//    API. Moho validates the menu to answer, which calls
+//    MohoMCP_Server:IsEnabled -> server.poll. Live: ~150 ms with every tool.
+//    The menu-bar item is found by content (the menu that holds an item
+//    titled MENU_FOLDER), not by its localized title; the element is cached
+//    and looked up again when it stops answering.
+//
+// Moho is found by bundle id. Request files older than MAX_REQUEST_AGE s are
+// orphans of a killed bridge and are ignored. At start the helper checks
+// CGPreflightPostEventAccess and AXIsProcessTrusted and prints a token to
+// stderr (console.log) for each missing permission.
+// Arguments: <ipcDir> [bundleId] [bridgePid]. Test entry points:
+// "--selftest <dir> <bundleId> <pid>", "--menus <pid>",
+// "--find <pid> <itemTitle> <subItemTitle>", "--wake <pid> <itemTitle> <subItemTitle>"
+// (all read-only).
+// The loop exits when the bridge is gone.
 export const MOHO_BUNDLE_ID = "com.lostmarble.moho";
+/** Folder name under Scripts/Menu = submenu title in Moho's Scripts menu. */
+export const MOHO_MENU_FOLDER = "MohoMCP";
+/** MohoMCP_Server:UILabel() in moho-plugin/MohoMCP_Server.lua. */
+export const MOHO_SERVER_MENU_ITEM = "Start/Stop MohoMCP Server";
 export const NO_EVENT_ACCESS_TOKEN = "MOHOMCP_NO_EVENT_ACCESS";
+export const NO_AX_ACCESS_TOKEN = "MOHOMCP_NO_AX_ACCESS";
+export const WAKE_TIMING = { tickMs: 100, nudgeEveryMs: 250, axAfterMs: 300, axEveryMs: 400 };
+
 export const MACOS_KEEPALIVE_JXA = String.raw`
 ObjC.import('Foundation');
 ObjC.import('AppKit');
 ObjC.import('CoreGraphics');
+ObjC.import('ApplicationServices');
 ObjC.import('unistd');
 
 var MAX_REQUEST_AGE = 60;
+var BUNDLE_ID = ${JSON.stringify(MOHO_BUNDLE_ID)};
+var MENU_FOLDER = ${JSON.stringify(MOHO_MENU_FOLDER)};
+var SERVER_ITEM = ${JSON.stringify(MOHO_SERVER_MENU_ITEM)};
+var TIMING = ${JSON.stringify(WAKE_TIMING)};
 
 function pending(dir) {
   var fm = $.NSFileManager.defaultManager;
@@ -142,6 +165,81 @@ function nudge(pid) {
   return true;
 }
 
+// ---- Accessibility (read-only: attributes are copied, never acted on) ----
+var axBound = false;
+function bindAx() {
+  if (axBound) return;
+  // The bridged signatures use CF out-pointers JXA cannot fill; bind as ids.
+  ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['int']]);
+  ObjC.bindFunction('AXUIElementCopyAttributeValue', ['int', ['id', 'id', 'id*']]);
+  axBound = true;
+}
+function axAttr(el, name) {
+  var ref = Ref();
+  var err = $.AXUIElementCopyAttributeValue(el, $(name), ref);
+  return err === 0 ? ref[0] : null;
+}
+function axChildren(el) {
+  var arr = axAttr(el, 'AXChildren');
+  var out = [];
+  if (!arr) return out;
+  for (var i = 0; i < arr.count; i++) out.push(arr.objectAtIndex(i));
+  return out;
+}
+function axTitle(el) {
+  var t = axAttr(el, 'AXTitle');
+  return t ? ObjC.unwrap(t) : '';
+}
+// Items of the menu attached to a menu-bar item or a submenu item.
+function axMenuItems(el) {
+  var menus = axChildren(el);
+  return menus.length ? axChildren(menus[0]) : [];
+}
+// The menu item <subTitle> inside the item titled <itemTitle> that sits in
+// any top-level menu of app <pid>, or null.
+function axFindItem(pid, itemTitle, subTitle) {
+  bindAx();
+  var bar = axAttr($.AXUIElementCreateApplication(pid), 'AXMenuBar');
+  if (!bar) return null;
+  var tops = axChildren(bar);
+  for (var i = 0; i < tops.length; i++) {
+    var items = axMenuItems(tops[i]);
+    for (var j = 0; j < items.length; j++) {
+      if (axTitle(items[j]) !== itemTitle) continue;
+      var subs = axMenuItems(items[j]);
+      for (var k = 0; k < subs.length; k++) {
+        if (axTitle(subs[k]) === subTitle) return subs[k];
+      }
+    }
+  }
+  return null;
+}
+var cachedItem = null, cachedPid = 0;
+// Read our menu item's enabled state; Moho validates the menu to answer.
+function axWake(pid, itemTitle, subTitle) {
+  if (!cachedItem || cachedPid !== pid) {
+    cachedItem = axFindItem(pid, itemTitle || MENU_FOLDER, subTitle || SERVER_ITEM);
+    cachedPid = pid;
+    if (!cachedItem) return false;
+  }
+  var enabled = axAttr(cachedItem, 'AXEnabled');
+  if (enabled === null) { cachedItem = null; return false; }
+  return true;
+}
+
+// One scheduling step: mouse nudge every nudgeEveryMs while a request is
+// pending; once it has been pending axAfterMs, also the menu read every
+// axEveryMs. Mutates state; actions = { nudge(), axWake() }.
+function wakeStep(state, now, isPending, actions) {
+  if (!isPending) { state.active = false; return; }
+  if (!state.active) { state.active = true; state.since = now; state.lastNudge = -Infinity; state.lastAx = -Infinity; }
+  if (now - state.lastNudge >= TIMING.nudgeEveryMs) { state.lastNudge = now; actions.nudge(); }
+  if (now - state.since >= TIMING.axAfterMs && now - state.lastAx >= TIMING.axEveryMs) {
+    state.lastAx = now;
+    actions.axWake();
+  }
+}
+
 // true / false, or null when the check is unavailable.
 function canPostEvents() {
   try {
@@ -151,25 +249,53 @@ function canPostEvents() {
     return null;
   }
 }
+function axTrusted() {
+  try { return $.AXIsProcessTrusted() ? true : false; } catch (e) { return null; }
+}
 
 function run(argv) {
   if (argv[0] === '--selftest') {
-    return JSON.stringify({ pending: pending(argv[1]), pid: findPid(argv[2]), posted: nudge(Number(argv[3])), access: canPostEvents() });
+    return JSON.stringify({ pending: pending(argv[1]), pid: findPid(argv[2]), posted: nudge(Number(argv[3])), access: canPostEvents(), ax: axTrusted() });
+  }
+  if (argv[0] === '--menus') {
+    bindAx();
+    var bar = axAttr($.AXUIElementCreateApplication(Number(argv[1])), 'AXMenuBar');
+    var tops = bar ? axChildren(bar) : [];
+    return JSON.stringify(tops.map(function (t) {
+      return axMenuItems(t).map(function (it) {
+        return { title: axTitle(it), sub: axMenuItems(it).map(axTitle) };
+      });
+    }));
+  }
+  if (argv[0] === '--wake') {
+    var first = axWake(Number(argv[1]), argv[2], argv[3]);
+    var cached = !!cachedItem;
+    var second = axWake(Number(argv[1]), argv[2], argv[3]);
+    return JSON.stringify({ first: first, cached: cached, second: second });
+  }
+  if (argv[0] === '--find') {
+    var item = axFindItem(Number(argv[1]), argv[2], argv[3]);
+    var en = item ? axAttr(item, 'AXEnabled') : null;
+    return JSON.stringify({ found: !!item, title: item ? axTitle(item) : null, enabled: en === null ? null : !!ObjC.unwrap(en) });
   }
   var dir = argv[0];
-  var bundleId = argv[1] || '` + MOHO_BUNDLE_ID + String.raw`';
-  if (canPostEvents() === false) console.log('` + NO_EVENT_ACCESS_TOKEN + String.raw`');
+  var bundleId = argv[1] || BUNDLE_ID;
+  if (canPostEvents() === false) console.log(${JSON.stringify(NO_EVENT_ACCESS_TOKEN)});
+  if (axTrusted() === false) console.log(${JSON.stringify(NO_AX_ACCESS_TOKEN)});
   // Exit once the bridge that spawned us is gone (we get reparented).
   var parent = argv[2] ? Number(argv[2]) : $.getppid();
+  var state = {};
   while (true) {
     if ($.getppid() !== parent) return;
     try {
-      if (pending(dir)) {
-        var pid = findPid(bundleId);
-        if (pid > 0) nudge(pid);
-      }
+      var isPending = pending(dir);
+      var pid = isPending ? findPid(bundleId) : 0;
+      wakeStep(state, Date.now(), isPending && pid > 0, {
+        nudge: function () { nudge(pid); },
+        axWake: function () { try { axWake(pid); } catch (e) { cachedItem = null; } },
+      });
     } catch (e) {}
-    delay(0.25);
+    delay(TIMING.tickMs / 1000);
   }
 }
 `;
@@ -179,7 +305,8 @@ export function noEventAccessMessage(env: NodeJS.ProcessEnv = process.env): stri
   const app = env.__CFBundleIdentifier || env.TERM_PROGRAM || "the app that runs your MCP client";
   return (
     `grant Accessibility to ${app} (System Settings > Privacy & Security > Accessibility) ` +
-    "so MohoMCP can wake Moho; until then requests may time out while Moho is idle."
+    "so MohoMCP can wake Moho (it posts a mouse-moved event to Moho and reads, never clicks, " +
+    "its own Scripts menu item); until then requests may time out while Moho is idle."
   );
 }
 
@@ -224,6 +351,7 @@ export function startKeepAlive(): void {
     scriptPath = path.join(dir, `keep-alive-${process.pid}.js`);
     fs.writeFileSync(scriptPath, MACOS_KEEPALIVE_JXA, "utf-8");
 
+    warnedAccess = false;
     keepAliveProcess = spawn(
       "osascript",
       ["-l", "JavaScript", scriptPath, dir, MOHO_BUNDLE_ID, String(process.pid)],
@@ -233,7 +361,9 @@ export function startKeepAlive(): void {
       },
     );
     keepAliveProcess.stderr?.on("data", (chunk: Buffer) => {
-      if (chunk.toString().includes(NO_EVENT_ACCESS_TOKEN)) {
+      const text = chunk.toString();
+      if (!warnedAccess && (text.includes(NO_EVENT_ACCESS_TOKEN) || text.includes(NO_AX_ACCESS_TOKEN))) {
+        warnedAccess = true;
         process.stderr.write(`[moho-mcp] WARNING: ${noEventAccessMessage()}\n`);
       }
     });
