@@ -193,7 +193,7 @@ Nothing comes to the front and focus does not change; Moho is found by its bundl
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp`, else `~/.moho-mcp` | Override the IPC directory. The plugin uses the same rule (TEMP, TMP, TMPDIR, then `~/.moho-mcp`, never the shared `/tmp`); both create it with mode 0700 |
+| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp`; on macOS, if none is set, `getconf DARWIN_USER_TEMP_DIR` + `/moho-mcp`; else `~/.moho-mcp` | Moves **only the bridge**: the plugin does not read this variable. The plugin always uses TEMP, TMP, TMPDIR (Moho launched from Finder has TMPDIR = the `getconf DARWIN_USER_TEMP_DIR` folder), then `~/.moho-mcp`, never the shared `/tmp`. Set it only to point the bridge at the folder Moho already uses. Both sides create the folder with mode 0700. MCP clients usually start the bridge with only HOME, LOGNAME, PATH, SHELL, TERM and USER, which is why the bridge asks `getconf` on macOS |
 | `MOHO_MCP_ENABLE_LUA_RUN` | unset | `1` registers the `lua_run` tool (arbitrary Lua inside Moho) and allows `lua.run` in batches. Off by default; see [tool-reference.md](tool-reference.md#lua_run) |
 
 ### Internal Timeouts

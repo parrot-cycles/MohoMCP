@@ -167,7 +167,7 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp`, else `~/.moho-mcp` | Directory for file-based IPC communication (created 0700; never the shared `/tmp`) |
+| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp` (macOS: else `getconf DARWIN_USER_TEMP_DIR`), else `~/.moho-mcp` | Bridge-side override of the IPC directory; the plugin does not read it (created 0700; never the shared `/tmp`) |
 | `MOHO_MCP_ENABLE_LUA_RUN` | unset | Set to `1` to register `lua_run` and allow `lua.run` in batches |
 
 Internal timing (in `bridge/src/config.ts`):
