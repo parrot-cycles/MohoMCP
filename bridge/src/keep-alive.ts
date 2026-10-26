@@ -8,8 +8,12 @@
  * On Windows: spawns a hidden PowerShell process that calls Win32
  * RedrawWindow on the MOHO window (~4 Hz).
  *
- * On macOS: spawns an osascript process that periodically tells
- * Moho to activate, triggering viewport redraws.
+ * On macOS: spawns a JavaScript-for-Automation (osascript -l JavaScript)
+ * helper. While a req_*.json is pending it posts a synthetic mouseMoved
+ * CGEvent straight to the running Moho process (CGEventPostToPid): Moho
+ * repaints and polls, the cursor does not move, focus does not change, and
+ * it works whether Moho is frontmost or in the background. It never launches
+ * or activates Moho; if Moho is not running it does nothing.
  */
 
 import { spawn, ChildProcess } from "node:child_process";
@@ -81,22 +85,68 @@ while ($true) {
 }
 `;
 
-// osascript does not dispatch the idle handler of a stay-open applet. Keep an
-// explicit loop alive, and activate Moho only while an IPC request is pending.
-// Pass the directory as an argument instead of interpolating paths into code.
-const APPLESCRIPT_KEEPALIVE = `
-on run argv
-  set ipcDirectory to item 1 of argv
-  repeat
-    try
-      set pendingRequest to do shell script "/usr/bin/find " & quoted form of ipcDirectory & " -maxdepth 1 -name 'req_*.json' -print -quit"
-      if pendingRequest is not "" then
-        tell application "Moho" to activate
-      end if
-    end try
-    delay 0.25
-  end repeat
-end run
+// macOS helper (JXA). `tell application "Moho" to activate` did nothing when
+// Moho was already frontmost and relaunched Moho after a crash; a mouseMoved
+// event posted to Moho's pid was answered 10/10 in ~280 ms in a live test.
+// Event type 5 = kCGEventMouseMoved, button 0 = kCGMouseButtonLeft. The point
+// is arbitrary (the cursor does not move). Do not CFRelease the event: the
+// JXA bridge owns it and a manual release crashes osascript.
+// Arguments: <ipcDir> [processName=Moho] [bridgePid]; "--selftest <dir> <name> <pid>"
+// runs each step once and prints JSON (used by tests, never posts to Moho).
+// The loop exits when its parent (the bridge) is gone.
+export const MACOS_KEEPALIVE_JXA = String.raw`
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+ObjC.import('CoreGraphics');
+ObjC.import('unistd');
+
+function pending(dir) {
+  var items = $.NSFileManager.defaultManager.contentsOfDirectoryAtPathError(dir, null);
+  if (!items) return false;
+  var names = ObjC.deepUnwrap(items) || [];
+  for (var i = 0; i < names.length; i++) {
+    if (/^req_\d+\.json$/.test(names[i])) return true;
+  }
+  return false;
+}
+
+// pid of the running app whose executable is named exactly <name>, else 0.
+function findPid(name) {
+  var apps = $.NSWorkspace.sharedWorkspace.runningApplications;
+  for (var i = 0; i < apps.count; i++) {
+    var app = apps.objectAtIndex(i);
+    var url = app.executableURL;
+    if (url && ObjC.unwrap(url.lastPathComponent) === name) return app.processIdentifier;
+  }
+  return 0;
+}
+
+function nudge(pid) {
+  var ev = $.CGEventCreateMouseEvent(null, 5, { x: 535, y: 317 }, 0);
+  if (!ev) return false;
+  $.CGEventPostToPid(pid, ev);
+  return true;
+}
+
+function run(argv) {
+  if (argv[0] === '--selftest') {
+    return JSON.stringify({ pending: pending(argv[1]), pid: findPid(argv[2]), posted: nudge(Number(argv[3])) });
+  }
+  var dir = argv[0];
+  var name = argv[1] || 'Moho';
+  // Exit once the bridge that spawned us is gone (we get reparented).
+  var parent = argv[2] ? Number(argv[2]) : $.getppid();
+  while (true) {
+    if ($.getppid() !== parent) return;
+    try {
+      if (pending(dir)) {
+        var pid = findPid(name);
+        if (pid > 0) nudge(pid);
+      }
+    } catch (e) {}
+    delay(0.25);
+  }
+}
 `;
 
 /**
@@ -135,13 +185,14 @@ export function startKeepAlive(): void {
       },
     );
   } else {
-    // macOS
-    scriptPath = path.join(dir, "keep-alive.scpt");
-    fs.writeFileSync(scriptPath, APPLESCRIPT_KEEPALIVE, "utf-8");
+    // macOS: one helper file per bridge process, so bridges sharing the IPC
+    // directory never delete each other's script.
+    scriptPath = path.join(dir, `keep-alive-${process.pid}.js`);
+    fs.writeFileSync(scriptPath, MACOS_KEEPALIVE_JXA, "utf-8");
 
     keepAliveProcess = spawn(
       "osascript",
-      [scriptPath, dir],
+      ["-l", "JavaScript", scriptPath, dir, "Moho", String(process.pid)],
       {
         stdio: "ignore",
         detached: false,

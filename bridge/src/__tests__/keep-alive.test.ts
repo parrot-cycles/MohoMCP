@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { config } from "../config.js";
-import { startKeepAlive, stopKeepAlive } from "../keep-alive.js";
+import { startKeepAlive, stopKeepAlive, MACOS_KEEPALIVE_JXA } from "../keep-alive.js";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 
@@ -32,28 +32,33 @@ describe("keep-alive lifecycle", () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  it("passes the configured IPC directory as data to a persistent macOS helper", () => {
+  it("passes the configured IPC directory as data to a persistent macOS JXA helper", () => {
     Object.assign(config.moho, { ipcDir: path.join(directory, 'custom "quoted" IPC') });
     startKeepAlive();
-    const scriptPath = path.join(config.moho.ipcDir, "keep-alive.scpt");
-    expect(spawn).toHaveBeenCalledWith("osascript", [scriptPath, config.moho.ipcDir], {
-      stdio: "ignore", detached: false,
-    });
+    const scriptPath = path.join(config.moho.ipcDir, `keep-alive-${process.pid}.js`);
+    expect(spawn).toHaveBeenCalledWith(
+      "osascript",
+      ["-l", "JavaScript", scriptPath, config.moho.ipcDir, "Moho", String(process.pid)],
+      { stdio: "ignore", detached: false },
+    );
     const script = fs.readFileSync(scriptPath, "utf8");
-    expect(script).toContain("on run argv");
-    expect(script).toContain("repeat");
-    expect(script).toContain("end repeat");
-    expect(script).toContain("quoted form of ipcDirectory");
-    expect(script).toContain('if pendingRequest is not "" then');
+    expect(script).toBe(MACOS_KEEPALIVE_JXA);
     expect(script).not.toContain(config.moho.ipcDir);
-    expect(script).not.toContain("on idle");
+  });
+
+  it("nudges Moho by pid with a mouseMoved event and never launches or activates it", () => {
+    expect(MACOS_KEEPALIVE_JXA).toContain("CGEventPostToPid");
+    expect(MACOS_KEEPALIVE_JXA).toContain("CGEventCreateMouseEvent(null, 5,");
+    expect(MACOS_KEEPALIVE_JXA).toContain("runningApplications");
+    expect(MACOS_KEEPALIVE_JXA).toContain("/^req_\\d+\\.json$/");
+    expect(MACOS_KEEPALIVE_JXA).not.toMatch(/activate|launch|tell application|openApplication|CFRelease/i);
   });
 
   it("does not spawn duplicate helpers and cleans up on disconnect", () => {
     startKeepAlive();
     startKeepAlive();
     expect(spawn).toHaveBeenCalledTimes(1);
-    const scriptPath = path.join(directory, "keep-alive.scpt");
+    const scriptPath = path.join(directory, `keep-alive-${process.pid}.js`);
     expect(fs.existsSync(scriptPath)).toBe(true);
     stopKeepAlive();
     expect(child.kill).toHaveBeenCalledTimes(1);

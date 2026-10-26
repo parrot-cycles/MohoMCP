@@ -3,9 +3,8 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const repo = path.resolve(__dirname, "../../..");
 const installer = path.join(repo, "install-plugin.sh");
 const plugin = path.join(repo, "moho-plugin");
 
