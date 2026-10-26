@@ -91,32 +91,46 @@ while ($true) {
 // Event type 5 = kCGEventMouseMoved, button 0 = kCGMouseButtonLeft. The point
 // is arbitrary (the cursor does not move). Do not CFRelease the event: the
 // JXA bridge owns it and a manual release crashes osascript.
-// Arguments: <ipcDir> [processName=Moho] [bridgePid]; "--selftest <dir> <name> <pid>"
-// runs each step once and prints JSON (used by tests, never posts to Moho).
-// The loop exits when its parent (the bridge) is gone.
+// Moho is found by bundle id, not by executable name.
+// Request files older than MAX_REQUEST_AGE seconds are orphans of a killed
+// bridge and are ignored, so helpers don't nudge Moho forever.
+// At start the helper checks CGPreflightPostEventAccess (bound by hand: it is
+// not in JXA's CoreGraphics bridge) and prints NO_EVENT_ACCESS_TOKEN to stderr
+// (console.log) when posting events is not permitted.
+// Arguments: <ipcDir> [bundleId] [bridgePid];
+// "--selftest <dir> <bundleId> <pid>" runs each step once and prints JSON
+// (used by tests, never posts to Moho). The loop exits when the bridge is gone.
+export const MOHO_BUNDLE_ID = "com.lostmarble.moho";
+export const NO_EVENT_ACCESS_TOKEN = "MOHOMCP_NO_EVENT_ACCESS";
 export const MACOS_KEEPALIVE_JXA = String.raw`
 ObjC.import('Foundation');
 ObjC.import('AppKit');
 ObjC.import('CoreGraphics');
 ObjC.import('unistd');
 
+var MAX_REQUEST_AGE = 60;
+
 function pending(dir) {
-  var items = $.NSFileManager.defaultManager.contentsOfDirectoryAtPathError(dir, null);
+  var fm = $.NSFileManager.defaultManager;
+  var items = fm.contentsOfDirectoryAtPathError(dir, null);
   if (!items) return false;
   var names = ObjC.deepUnwrap(items) || [];
   for (var i = 0; i < names.length; i++) {
-    if (/^req_\d+\.json$/.test(names[i])) return true;
+    if (!/^req_\d+\.json$/.test(names[i])) continue;
+    var attrs = fm.attributesOfItemAtPathError(dir + '/' + names[i], null);
+    if (!attrs || attrs.isNil()) continue;
+    var age = -attrs.fileModificationDate.timeIntervalSinceNow;
+    if (age <= MAX_REQUEST_AGE) return true;
   }
   return false;
 }
 
-// pid of the running app whose executable is named exactly <name>, else 0.
-function findPid(name) {
+// pid of the running app with this bundle identifier, else 0.
+function findPid(bundleId) {
   var apps = $.NSWorkspace.sharedWorkspace.runningApplications;
   for (var i = 0; i < apps.count; i++) {
     var app = apps.objectAtIndex(i);
-    var url = app.executableURL;
-    if (url && ObjC.unwrap(url.lastPathComponent) === name) return app.processIdentifier;
+    if (ObjC.unwrap(app.bundleIdentifier) === bundleId) return app.processIdentifier;
   }
   return 0;
 }
@@ -128,19 +142,30 @@ function nudge(pid) {
   return true;
 }
 
+// true / false, or null when the check is unavailable.
+function canPostEvents() {
+  try {
+    ObjC.bindFunction('CGPreflightPostEventAccess', ['bool', []]);
+    return $.CGPreflightPostEventAccess() ? true : false;
+  } catch (e) {
+    return null;
+  }
+}
+
 function run(argv) {
   if (argv[0] === '--selftest') {
-    return JSON.stringify({ pending: pending(argv[1]), pid: findPid(argv[2]), posted: nudge(Number(argv[3])) });
+    return JSON.stringify({ pending: pending(argv[1]), pid: findPid(argv[2]), posted: nudge(Number(argv[3])), access: canPostEvents() });
   }
   var dir = argv[0];
-  var name = argv[1] || 'Moho';
+  var bundleId = argv[1] || '` + MOHO_BUNDLE_ID + String.raw`';
+  if (canPostEvents() === false) console.log('` + NO_EVENT_ACCESS_TOKEN + String.raw`');
   // Exit once the bridge that spawned us is gone (we get reparented).
   var parent = argv[2] ? Number(argv[2]) : $.getppid();
   while (true) {
     if ($.getppid() !== parent) return;
     try {
       if (pending(dir)) {
-        var pid = findPid(name);
+        var pid = findPid(bundleId);
         if (pid > 0) nudge(pid);
       }
     } catch (e) {}
@@ -148,6 +173,15 @@ function run(argv) {
   }
 }
 `;
+
+/** Who to grant Accessibility to: the app this bridge runs under, if known. */
+export function noEventAccessMessage(env: NodeJS.ProcessEnv = process.env): string {
+  const app = env.__CFBundleIdentifier || env.TERM_PROGRAM || "the app that runs your MCP client";
+  return (
+    `grant Accessibility to ${app} (System Settings > Privacy & Security > Accessibility) ` +
+    "so MohoMCP can wake Moho; until then requests may time out while Moho is idle."
+  );
+}
 
 /**
  * Start the keep-alive process. Works on Windows and macOS.
@@ -192,12 +226,17 @@ export function startKeepAlive(): void {
 
     keepAliveProcess = spawn(
       "osascript",
-      ["-l", "JavaScript", scriptPath, dir, "Moho", String(process.pid)],
+      ["-l", "JavaScript", scriptPath, dir, MOHO_BUNDLE_ID, String(process.pid)],
       {
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "pipe"],
         detached: false,
       },
     );
+    keepAliveProcess.stderr?.on("data", (chunk: Buffer) => {
+      if (chunk.toString().includes(NO_EVENT_ACCESS_TOKEN)) {
+        process.stderr.write(`[moho-mcp] WARNING: ${noEventAccessMessage()}\n`);
+      }
+    });
   }
 
   keepAliveProcess.on("exit", () => {
