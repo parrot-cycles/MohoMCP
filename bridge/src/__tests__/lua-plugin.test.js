@@ -656,6 +656,36 @@ describe("Lua lua.run", () => {
     setmetatable(moho, base)
   `));
 
+  it("restores the File methods when opening the undo step fails", () => runLua(fakeMoho + `
+    local class = {FileNew = function() return "FileNew" end}
+    class.__index = class
+    local base = getmetatable(moho)
+    setmetatable(moho, class)
+    local realPrep = doc.PrepUndo
+    doc.PrepUndo = function() error("prep failed") end
+    local r, err = scriptTools.run(moho, {code="return 1"})
+    assert(r == nil and err:find("prep failed"), tostring(err))
+    assert(moho:FileNew() == "FileNew", "FileNew left swapped")
+    doc.PrepUndo = realPrep
+    setmetatable(moho, base)
+  `));
+
+  it("treats a swap that does not take effect as missed and refuses chunks naming it", () => runLua(fakeMoho + `
+    -- The class table has a FileNew field, but lookups go through an __index
+    -- function to a hidden table, so swapping the field changes nothing.
+    local hidden = {FileNew = function() return "real FileNew" end}
+    local class = {FileNew = hidden.FileNew}
+    class.__index = function(_, k) return hidden[k] end
+    local base = getmetatable(moho)
+    setmetatable(moho, class)
+    local r, err = scriptTools.run(moho, {undo=false, code="return moho:FileNew()"})
+    assert(r == nil and err:find("moho:FileNew() is blocked", 1, true), tostring(err))
+    assert(rawget(class, "FileNew") == hidden.FileNew, "class field not restored")
+    local ok = assert(scriptTools.run(moho, {undo=false, code="return 7"}))
+    assert(ok.result == 7)
+    setmetatable(moho, base)
+  `));
+
   it("emits the result truncation marker once, even when nested", () => runLua(fakeMoho + `
     local r = assert(scriptTools.run(moho, {undo=false, code=[[
       local outer = {}

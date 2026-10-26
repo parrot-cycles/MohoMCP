@@ -151,28 +151,50 @@ local function methodHolder(obj, name)
 end
 
 --- Temporarily replace the blocked methods where they live, so the real
---- `moho` userdata can still be handed to other scripts' APIs.
+--- `moho` userdata can still be handed to other scripts' APIs. Each swap is
+--- verified: if `moho.<name>` does not resolve to the stub afterwards (the
+--- binding looks methods up some other way), the swap is undone and the name
+--- is reported as missed. Never raises.
 -- @return function  restores the originals (safe to call more than once)
 -- @return table  names that could not be blocked
 local function blockFileCalls(moho)
     local saved, missed = {}, {}
-    for _, name in ipairs(script.BLOCKED_METHODS) do
-        local holder = moho ~= nil and methodHolder(moho, name) or nil
-        if holder then
-            saved[#saved + 1] = { holder, name, rawget(holder, name) }
-            rawset(holder, name, function()
-                error("moho:" .. name .. "() is blocked in lua_run: Moho crashes when it creates, opens, "
-                    .. "closes, imports or renders documents from inside the MohoMCP poll", 2)
-            end)
-        else
-            missed[#missed + 1] = name
-        end
-    end
     local function restore()
         for i = #saved, 1, -1 do
             local entry = saved[i]
             pcall(rawset, entry[1], entry[2], entry[3])
         end
+    end
+    local ok = pcall(function()
+        for _, name in ipairs(script.BLOCKED_METHODS) do
+            local holder = moho ~= nil and methodHolder(moho, name) or nil
+            local blocked = false
+            if holder then
+                local entry = { holder, name, rawget(holder, name) }
+                local stub = function()
+                    error("moho:" .. name .. "() is blocked in lua_run: Moho crashes when it creates, opens, "
+                        .. "closes, imports or renders documents from inside the MohoMCP poll", 2)
+                end
+                saved[#saved + 1] = entry
+                rawset(holder, name, stub)
+                local resolved = nil
+                pcall(function() resolved = moho[name] end)
+                if rawequal(resolved, stub) then
+                    blocked = true
+                else
+                    rawset(holder, name, entry[3])
+                    saved[#saved] = nil
+                end
+            end
+            if not blocked then missed[#missed + 1] = name end
+        end
+    end)
+    if not ok then
+        -- Something in the binding raised: undo everything, block nothing.
+        restore()
+        saved = {}
+        missed = {}
+        for _, name in ipairs(script.BLOCKED_METHODS) do missed[#missed + 1] = name end
     end
     return restore, missed
 end
@@ -232,10 +254,17 @@ function script.run(moho, params)
     end
 
     -- Changes made by the chunk are one undoable step, like a menu script
-    -- (Scripts/Menu/Particle Effects/lm_snow.lua:45-46).
-    if params.undo ~= false and doc then
-        doc:PrepUndo(nil)
-        doc:SetDirty()
+    -- (Scripts/Menu/Particle Effects/lm_snow.lua:45-46). Protected, so a
+    -- failure here cannot leave the File methods swapped.
+    local prepOk, prepErr = pcall(function()
+        if params.undo ~= false and doc then
+            doc:PrepUndo(nil)
+            doc:SetDirty()
+        end
+    end)
+    if not prepOk then
+        unblock()
+        return nil, "lua_run could not open an undo step: " .. tostring(prepErr)
     end
 
     -- Abort runaway Lua loops instead of freezing Moho. The count hook only
@@ -248,7 +277,9 @@ function script.run(moho, params)
     if debug and debug.sethook and debug.gethook then
         local elapsed = script.clock()
         local limit = script.timeLimit
-        oldHook, oldMask, oldCount = debug.gethook()
+        local gotHook
+        gotHook, oldHook, oldMask, oldCount = pcall(debug.gethook)
+        if not gotHook then oldHook = nil end
         hookSet = pcall(debug.sethook, function()
             if active and elapsed() > limit then
                 error("lua.run time limit (" .. limit .. " s) exceeded", 2)
