@@ -615,7 +615,9 @@ Execute a Lua chunk inside MOHO, the equivalent of Blender MCP's `execute_blende
 ```json
 { "result": { "layers": 4 }, "output": "printed lines\nseparated by newlines" }
 ```
-`result` is the chunk's return value (several values become an array; none becomes `null`). Tables become arrays (keys 1..n) or objects; userdata, functions and threads become `tostring()` strings. `print()` output is captured (up to 64 KB). A Lua error is returned as JSON-RPC error `-32603` whose message holds the Lua error and any output printed before it; the server keeps running. A chunk that runs longer than ~8 s of CPU is stopped.
+`result` is the chunk's return value (several values become an array; none becomes `null`). Tables become arrays (keys 1..n) or objects; userdata, functions and threads become `tostring()` strings. `print()` output is captured (up to 64 KB). A Lua error is returned as JSON-RPC error `-32603` whose message holds the Lua error and any output printed before it; the server keeps running. A chunk is stopped after about 20 s of wall-clock time (checked between Lua instructions, so one long call into Moho, such as a render, cannot be interrupted). Captured output is capped at 64 KB and the serialized result at about 1 MB; either cut adds a `…[truncated]` marker and `"truncated": true` to the response.
+
+The bridge waits up to 30 s for `lua_run` (and for a `batch_execute` that contains `lua.run`), which includes waiting for Moho to repaint and pick the request up. **A `lua_run` that timed out on the bridge side may still have run and applied its edit afterwards** — inspect the document (or undo) before retrying, or the edit can be applied twice.
 
 **Example:**
 ```lua

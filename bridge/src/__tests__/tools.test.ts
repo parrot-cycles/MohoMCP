@@ -241,9 +241,29 @@ describe("registerTools", () => {
       return z.object(findTool(name).schema as z.ZodRawShape).safeParse(input);
     }
 
-    it("lua_run forwards code and the undo flag", async () => {
+    it("lua_run forwards code and the undo flag with the longer lua timeout", async () => {
       await findTool("lua_run").handler({ code: "return 1", undo: false });
-      expect(client.sendRequest).toHaveBeenCalledWith("lua.run", { code: "return 1", undo: false });
+      expect(client.sendRequest).toHaveBeenCalledWith(
+        "lua.run",
+        { code: "return 1", undo: false },
+        { timeout: 30000 },
+      );
+    });
+
+    it("batch_execute uses the lua timeout only when the batch contains lua.run", async () => {
+      const batch = findTool("batch_execute");
+      await batch.handler({ operations: [{ method: "layer.create" }, { method: "lua.run" }], stopOnError: false });
+      expect(client.sendRequest).toHaveBeenLastCalledWith(
+        "batch.execute",
+        expect.anything(),
+        { timeout: 30000 + 2 * 500 },
+      );
+      await batch.handler({ operations: [{ method: "layer.create" }], stopOnError: false });
+      expect(client.sendRequest).toHaveBeenLastCalledWith(
+        "batch.execute",
+        expect.anything(),
+        { timeout: 10000 + 500 },
+      );
     });
 
     it("lua_run requires non-empty code", () => {

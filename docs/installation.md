@@ -187,6 +187,7 @@ Configured in `bridge/src/config.ts`:
 | `pollInterval` | 100ms | How often bridge checks for response files |
 | `requestTimeout` | 10,000ms | Max wait for a normal Lua response |
 | `renderTimeout` | 30,000ms | Max wait for screenshot/render operations |
+| `luaRunTimeout` | 30,000ms | Max wait for `lua_run` and for batches containing `lua.run` (Lua stops chunks after 20 s; a timed-out call may still apply its edit later) |
 | `batchTimeoutPerOp` | 500ms | Additional timeout per operation in a batch |
 | `maxBatchSize` | 50 | Maximum operations per `batch_execute` call |
 

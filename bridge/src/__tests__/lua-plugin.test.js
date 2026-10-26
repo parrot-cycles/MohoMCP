@@ -221,6 +221,12 @@ LM = {
     end
     return c
   end},
+  Stopwatch = {new_local=function()
+    local w = {}
+    function w:Start() self.t0 = os.clock() end
+    function w:ElapsedTime() return os.clock() - self.t0 end
+    return w
+  end},
   -- Translation-only matrices are enough to check parent-space conversion.
   Matrix = {new_local=function()
     local m = {ox=0, oy=0}
@@ -459,6 +465,70 @@ describe("Lua lua.run", () => {
     assert(r == nil and err:find("boom") and err:find("before"), err)
     r, err = scriptTools.run(moho, {code="return +"})
     assert(r == nil and err:find("syntax"), err)
+  `));
+
+  it("measures the time limit with Moho's wall-clock stopwatch when available", () => runLua(fakeMoho + `
+    LM.Stopwatch = {new_local=function()
+      return {Start=function() end, ElapsedTime=function() return 99 end}
+    end}
+    assert(scriptTools.clock()() == 99)
+    LM.Stopwatch = nil
+    local t = scriptTools.clock()()
+    assert(type(t) == "number" and t >= 0 and t < 2, "os.time fallback")
+    assert(scriptTools.timeLimit == 20)
+  `));
+
+  it("always restores the previous hook and ignores a hook firing after the chunk", () => runLua(fakeMoho + `
+    local sentinel = function() end
+    debug.sethook(sentinel, "", 1000000000)
+    local installed
+    local realSet = debug.sethook
+    debug.sethook = function(f, ...)
+      if f ~= nil and f ~= sentinel then installed = f end
+      return realSet(f, ...)
+    end
+    scriptTools.timeLimit = 0
+    assert(scriptTools.run(moho, {code="return 1", undo=false}))
+    assert(debug.gethook() == sentinel, "hook not restored after success")
+    assert(installed, "no time-limit hook was installed")
+    -- Past the limit, a late fire must be a no-op once the chunk has returned.
+    assert(pcall(installed), "late hook fire escaped")
+    scriptTools.timeLimit = 0.05
+    local r, err = scriptTools.run(moho, {code="while true do end", undo=false})
+    assert(r == nil and err:find("time limit"), tostring(err))
+    assert(debug.gethook() == sentinel, "hook not restored after timeout")
+    r, err = scriptTools.run(moho, {code="error('x')", undo=false})
+    assert(r == nil and debug.gethook() == sentinel, "hook not restored after error")
+    debug.sethook = realSet
+    debug.sethook()
+  `));
+
+  it("caps captured print output at 64 KB with a marker", () => runLua(fakeMoho + `
+    local r = assert(scriptTools.run(moho, {undo=false, code=[[
+      local chunk = string.rep("x", 1000)
+      for i = 1, 100 do print(chunk) end
+      print("after the cap")
+    ]]}))
+    assert(#r.output <= 64 * 1024, "output is " .. #r.output .. " bytes")
+    assert(r.output:sub(-#"…[truncated]") == "…[truncated]", "missing marker")
+    assert(not r.output:find("after the cap", 1, true))
+    assert(r.truncated == true)
+    local small = assert(scriptTools.run(moho, {undo=false, code="print('a', 1); print('b')"}))
+    assert(small.output == "a\\t1\\nb" and small.truncated == nil, small.output)
+  `));
+
+  it("caps the serialized result at about 1 MB with a marker", () => runLua(fakeMoho + `
+    local r = assert(scriptTools.run(moho, {undo=false, code=[[
+      local t = {}
+      for i = 1, 3000 do t[i] = string.rep("y", 1000) end
+      return t
+    ]]}))
+    assert(r.truncated == true)
+    assert(r.result[#r.result] == "…[truncated]", "missing marker")
+    local encoded = json.encode(r.result)
+    assert(#encoded < 1024 * 1024 + 4096, "encoded result is " .. #encoded .. " bytes")
+    local big = assert(scriptTools.run(moho, {undo=false, code="return string.rep('z', 2 * 1024 * 1024)"}))
+    assert(#big.result <= 1024 * 1024 and big.result:sub(-#"…[truncated]") == "…[truncated]")
   `));
 
   it("aborts a runaway loop", () => runLua(fakeMoho + `

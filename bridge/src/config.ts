@@ -10,6 +10,7 @@ export const config = {
     pollInterval: 100,      // ms between checking for response files
     requestTimeout: 10000,  // ms before a request times out
     renderTimeout: 30000,   // ms timeout for render/screenshot requests
+    luaRunTimeout: 30000,   // ms timeout for lua.run (Lua side stops chunks after 20 s)
     batchTimeoutPerOp: 500, // additional ms per operation in a batch
     maxBatchSize: 50,       // maximum number of operations in a single batch
   },

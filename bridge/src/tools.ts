@@ -917,7 +917,9 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     "Execute a Lua chunk inside MOHO (like Blender's execute code). In scope: moho (the ScriptInterface), " +
       "doc/document (moho.document), json, and all MOHO/LM globals. return a value to get it back as JSON " +
       "(tables become objects/arrays, userdata becomes a string); print() output is captured. " +
-      "Lua errors come back as tool errors. Runs as one undo step unless undo is false; chunks are stopped after ~8 s of CPU.",
+      "Lua errors come back as tool errors. Runs as one undo step unless undo is false. Chunks are stopped after ~20 s " +
+      "(between Lua instructions; a single long Moho call cannot be interrupted); the bridge waits up to 30 s. " +
+      "If a call times out its edit may still have been applied: inspect the document before retrying.",
     {
       code: z.string().min(1).describe("Lua source to run"),
       undo: z
@@ -928,7 +930,11 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     async ({ code, undo }) => {
       try {
         await ensureConnected(client);
-        const result = await client.sendRequest("lua.run", { code, undo });
+        const result = await client.sendRequest(
+          "lua.run",
+          { code, undo },
+          { timeout: config.moho.luaRunTimeout },
+        );
         return successContent(result);
       } catch (err) {
         return errorContent(err);
@@ -977,9 +983,11 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     async ({ operations, stopOnError }) => {
       try {
         await ensureConnected(client);
-        const timeout =
-          config.moho.requestTimeout +
-          operations.length * config.moho.batchTimeoutPerOp;
+        // A lua.run inside the batch may legitimately run up to its 20 s Lua limit.
+        const base = operations.some((op) => op.method === "lua.run")
+          ? config.moho.luaRunTimeout
+          : config.moho.requestTimeout;
+        const timeout = base + operations.length * config.moho.batchTimeoutPerOp;
         const result = await client.sendRequest(
           "batch.execute",
           { operations, stopOnError },

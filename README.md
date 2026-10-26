@@ -179,6 +179,7 @@ Internal timing (in `bridge/src/config.ts`):
 | Poll interval | 100ms | How often the bridge checks for response files |
 | Request timeout | 10s | Max wait time for a Lua response |
 | Render timeout | 30s | Max wait time for screenshot operations |
+| Lua run timeout | 30s | Max wait for `lua_run` / batches with `lua.run` (chunks stop after 20 s in Moho) |
 | Batch timeout per op | 500ms | Additional timeout per operation in a batch |
 | Max batch size | 50 | Maximum operations per `batch_execute` call |
 
