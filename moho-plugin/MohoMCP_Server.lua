@@ -173,13 +173,14 @@ local function installDrawMeHooks()
 		"LM_TransformLayer", "LM_SetOrigin",
 		"LM_FollowCurve", "LM_RotateLayerXY", "LM_ShearLayer",
 		"LM_TrackCamera", "LM_ZoomCamera", "LM_RollCamera", "LM_PanTiltCamera",
-		"LM_PanWorkspace", "LM_ZoomWorkspace", "LM_RotateWorkspace", "LM_OrbitWorkspace",
+		"LM_PanW", "LM_ZoomW", "LM_RotateW", "LM_OrbitW", -- workspace tools (ScriptName in lm_pan_workspace.lua etc.)
 	}
 
 	local wrapped = 0
 	for _, name in ipairs(toolNames) do
-		local tool = _G[name]
-		if tool and tool.DrawMe then
+		local tool = rawget(_G, name)
+		-- Skip names that are missing or not tool tables (other Moho versions).
+		if type(tool) == "table" and type(tool.DrawMe) == "function" then
 			local original = tool.DrawMe
 			tool.DrawMe = function(self, moho, view)
 				-- Poll for MohoMCP requests (wrapped in pcall to survive crashes)

@@ -807,3 +807,18 @@ end
     assert(json.decode(files[dir .. "resp_99.json"]).result.result == 1)
   `));
 });
+
+describe("MohoMCP_Server DrawMe hook list", () => {
+  const server = fs.readFileSync(path.join(plugin, "MohoMCP_Server.lua"), "utf8");
+  it("wraps the workspace tools by their real ScriptNames", () => {
+    for (const name of ["LM_PanW", "LM_ZoomW", "LM_RotateW", "LM_OrbitW"]) {
+      if (!server.includes(`"${name}"`)) throw new Error(`${name} missing from the wrap list`);
+    }
+    if (/LM_(Pan|Zoom|Rotate|Orbit)Workspace/.test(server)) throw new Error("non-existent *Workspace names still listed");
+  });
+  it("skips missing or non-table tool globals", () => {
+    if (!server.includes('type(tool) == "table" and type(tool.DrawMe) == "function"')) {
+      throw new Error("wrap loop does not guard against missing tools");
+    }
+  });
+});
