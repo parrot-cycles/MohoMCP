@@ -377,7 +377,8 @@ describe("Lua shape.draw", () => {
     m.points[1] = {x=9, y=9, fSelected=true, SetCurvature=function() end}
     local r = assert(shapeTools.draw(moho, {layer="Sketch", closed=true,
       points={{0,0},{1,0},{0.5,1}}, fill={r=1, g=0, b=0}}))
-    assert(moho.layer == sketch and indexOf("SetSelLayer Sketch"))
+    assert(indexOf("SetSelLayer Sketch") < indexOf("AddLonePoint"), "shape must be built on the target layer")
+    assert(moho.layer == art and indexOf("SetSelLayer Art"), "previous current layer not restored")
     assert(indexOf("PrepUndo Sketch") and indexOf("SetDirty"))
     assert(#m.points == 4, "closing point must be welded away")
     assert(indexOf("WeldPoints 4 1"))

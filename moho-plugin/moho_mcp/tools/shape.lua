@@ -68,15 +68,23 @@ function shape.draw(moho, params)
     end
     local targetId = edit.layerId(moho, lyr)
 
-    -- moho:CreateShape works on the current layer, so make the target current.
+    -- moho:CreateShape works on the current layer, so make the target current
+    -- and switch back afterwards, as rt_break_apart_shapes.lua:333-355 does.
+    local prevLayer = nil
     if edit.layerId(moho, moho.layer) ~= targetId then
+        prevLayer = moho.layer
         moho:SetSelLayer(lyr)
         if edit.layerId(moho, moho.layer) ~= targetId then
+            if prevLayer then moho:SetSelLayer(prevLayer) end
             return nil, "Could not make layer " .. tostring(targetId) .. " the current layer"
         end
     end
+    local function restoreLayer()
+        if prevLayer then pcall(function() moho:SetSelLayer(prevLayer) end) end
+    end
     local mesh = moho:Mesh()
     if mesh == nil then
+        restoreLayer()
         return nil, "Current layer has no mesh"
     end
 
@@ -118,6 +126,7 @@ function shape.draw(moho, params)
     end
     mesh:SelectNone()
     if shapeId < 0 then
+        restoreLayer()
         edit.finish()
         return nil, "Moho could not create a shape from these points (points " ..
             n .. ".." .. (n + #coords - 1) .. " were added)"
@@ -142,6 +151,7 @@ function shape.draw(moho, params)
         shp.fMyStyle.fLineWidth = params.strokeWidth / moho.document:Height()
     end
 
+    restoreLayer()
     edit.finish()
 
     local hasFill, hasOutline = wantFill, true
