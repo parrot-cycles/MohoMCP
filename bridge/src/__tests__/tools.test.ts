@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { z } from "zod";
 import { registerTools } from "../tools.js";
 import { MohoClient } from "../moho-client.js";
 
@@ -62,9 +63,9 @@ describe("registerTools", () => {
     ).not.toThrow();
   });
 
-  it("registers exactly 26 tools", () => {
+  it("registers exactly 30 tools", () => {
     registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
-    expect(mockServer.tools).toHaveLength(26);
+    expect(mockServer.tools).toHaveLength(30);
   });
 
   it("registers all expected tool names", () => {
@@ -102,6 +103,12 @@ describe("registerTools", () => {
     expect(names).toContain("input_mouseClick");
     expect(names).toContain("input_mouseDrag");
     expect(names).toContain("input_sendKeys");
+
+    // Creation tools
+    expect(names).toContain("layer_create");
+    expect(names).toContain("shape_draw");
+    expect(names).toContain("bone_create");
+    expect(names).toContain("lua_run");
   });
 
   it("each tool has a non-empty description", () => {
@@ -228,6 +235,80 @@ describe("registerTools", () => {
           frame: 10,
         },
       );
+    });
+
+    function parse(name: string, input: unknown) {
+      return z.object(findTool(name).schema as z.ZodRawShape).safeParse(input);
+    }
+
+    it("lua_run forwards code and the undo flag", async () => {
+      await findTool("lua_run").handler({ code: "return 1", undo: false });
+      expect(client.sendRequest).toHaveBeenCalledWith("lua.run", { code: "return 1", undo: false });
+    });
+
+    it("lua_run requires non-empty code", () => {
+      expect(parse("lua_run", { code: "return 1" }).success).toBe(true);
+      expect(parse("lua_run", { code: "" }).success).toBe(false);
+      expect(parse("lua_run", {}).success).toBe(false);
+    });
+
+    it("shape_draw forwards points, style and layer to shape.draw", async () => {
+      const args = {
+        layer: "Ink",
+        points: [[0, 0], [1, 0], [1, 1]],
+        closed: true,
+        fill: { r: 1, g: 0, b: 0 },
+        stroke: { r: 0, g: 0, b: 0, a: 1 },
+        strokeWidth: 4,
+        smooth: true,
+      };
+      await findTool("shape_draw").handler(args);
+      expect(client.sendRequest).toHaveBeenCalledWith("shape.draw", args);
+    });
+
+    it("shape_draw validates points, colors and width", () => {
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]] }).success).toBe(true);
+      expect(parse("shape_draw", { layer: 3, points: [[0, 0], [1, 1]], fill: { r: 255, g: 0, b: 0, a: 128 } }).success).toBe(true);
+      expect(parse("shape_draw", { points: [[0, 0]] }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1]] }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], fill: { r: 300, g: 0, b: 0 } }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], stroke: { r: 1, g: 0 } }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], strokeWidth: -1 }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], layer: 1.5 }).success).toBe(false);
+    });
+
+    it("layer_create forwards to layer.create and allows only supported types", async () => {
+      await findTool("layer_create").handler({ type: "vector", name: "Ink", parent: "Group" });
+      expect(client.sendRequest).toHaveBeenCalledWith("layer.create", { type: "vector", name: "Ink", parent: "Group" });
+      for (const type of ["vector", "group", "bone"]) {
+        expect(parse("layer_create", { type, name: "L" }).success).toBe(true);
+      }
+      expect(parse("layer_create", { type: "image", name: "L" }).success).toBe(false);
+      expect(parse("layer_create", { type: "vector", name: "" }).success).toBe(false);
+      expect(parse("layer_create", { type: "vector" }).success).toBe(false);
+    });
+
+    it("bone_create forwards to bone.create and validates its params", async () => {
+      const args = { layer: 2, name: "arm", origin: [0, 0.5], length: 0.4, angle: 1.57, parent: "torso" };
+      await findTool("bone_create").handler(args);
+      expect(client.sendRequest).toHaveBeenCalledWith("bone.create", args);
+      expect(parse("bone_create", { name: "a", origin: [0, 0], length: 1 }).success).toBe(true);
+      expect(parse("bone_create", { name: "a", origin: [0, 0], length: -1 }).success).toBe(false);
+      expect(parse("bone_create", { name: "a", origin: [0], length: 1 }).success).toBe(false);
+      expect(parse("bone_create", { name: "a", origin: [0, 0], length: 1, parent: -1 }).success).toBe(false);
+      expect(parse("bone_create", { origin: [0, 0], length: 1 }).success).toBe(false);
+    });
+
+    it("new tools report MOHO errors as tool errors", async () => {
+      (client.sendRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("MOHO error [-32603]: Lua error: boom"),
+      );
+      const result = (await findTool("lua_run").handler({ code: "error('boom')" })) as {
+        isError?: boolean;
+        content: Array<{ text: string }>;
+      };
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("boom");
     });
   });
 });

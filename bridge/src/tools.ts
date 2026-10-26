@@ -804,10 +804,143 @@ export function registerTools(server: McpServer, client: MohoClient): void {
   );
 
   // =========================================================================
+  // Phase 4: Creation
+  // =========================================================================
+
+  const layerRef = z
+    .union([z.number().int(), z.string().min(1)])
+    .describe("Layer absolute ID (number) or layer name (string)");
+  const color = z
+    .object({
+      r: z.number().min(0).max(255),
+      g: z.number().min(0).max(255),
+      b: z.number().min(0).max(255),
+      a: z.number().min(0).max(255).optional(),
+    })
+    .describe("RGBA color. Channels 0-1; if any channel is above 1 all are read as 0-255. a defaults to opaque.");
+  const point = z.tuple([z.number(), z.number()]);
+
+  // 26. layer.create — Create a new layer
+  server.tool(
+    "layer_create",
+    "Create a new layer (vector, group or bone) with a name, optionally inside a parent group/bone layer. " +
+      "One undo step. Returns { layerId, name, type, parentId }.",
+    {
+      type: z.enum(["vector", "group", "bone"]).describe("Layer type"),
+      name: z.string().min(1).describe("Name for the new layer"),
+      parent: layerRef.optional().describe("Parent group or bone layer (ID or name); default: where Moho puts new layers"),
+    },
+    async ({ type, name, parent }) => {
+      try {
+        await ensureConnected(client);
+        const result = await client.sendRequest("layer.create", { type, name, parent });
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // 27. shape.draw — Draw a shape from points
+  server.tool(
+    "shape_draw",
+    "Draw a new shape in a vector layer from a list of points in Moho world units " +
+      "(the default 16:9 frame spans about x -1.78..1.78, y -1..1). " +
+      "closed: true makes a polygon that can be filled; otherwise an open stroke. " +
+      "With no fill/stroke given, Moho's current style is used. One undo step. " +
+      "Returns { layerId, layerName, shapeId, pointIds, closed, hasFill, hasOutline }.",
+    {
+      layer: layerRef.optional().describe("Target vector layer (ID or name); default: the current layer"),
+      points: z.array(point).min(2).describe("Points as [[x, y], ...]; at least 3 when closed"),
+      closed: z.boolean().optional().describe("Close the path into a polygon (default false)"),
+      fill: color.optional().describe("Fill color (closed shapes only); omit stroke for a fill without outline"),
+      stroke: color.optional().describe("Outline color"),
+      strokeWidth: z.number().nonnegative().optional().describe("Outline width in pixels"),
+      smooth: z.boolean().optional().describe("Smooth (curved) corners instead of sharp ones (default false)"),
+    },
+    async ({ layer, points, closed, fill, stroke, strokeWidth, smooth }) => {
+      try {
+        await ensureConnected(client);
+        const result = await client.sendRequest("shape.draw", {
+          layer,
+          points,
+          closed,
+          fill,
+          stroke,
+          strokeWidth,
+          smooth,
+        });
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // 28. bone.create — Add a bone to a bone layer
+  server.tool(
+    "bone_create",
+    "Add a bone to a bone layer's rest pose (frame 0). origin is the bone's base in the layer's coordinates; " +
+      "angle is in radians (0 points along +x). One undo step. Returns { layerId, boneId, name, parentId }.",
+    {
+      layer: layerRef.optional().describe("Bone layer (ID or name); default: the current layer"),
+      name: z.string().min(1).describe("Bone name"),
+      origin: point.describe("Base of the bone as [x, y]"),
+      length: z.number().nonnegative().describe("Bone length in world units"),
+      angle: z.number().optional().describe("Bone angle in radians (default 0)"),
+      parent: z
+        .union([z.number().int().nonnegative(), z.string().min(1)])
+        .optional()
+        .describe("Parent bone ID (number) or name (string)"),
+    },
+    async ({ layer, name, origin, length, angle, parent }) => {
+      try {
+        await ensureConnected(client);
+        const result = await client.sendRequest("bone.create", {
+          layer,
+          name,
+          origin,
+          length,
+          angle,
+          parent,
+        });
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // 29. lua.run — Execute Lua inside MOHO
+  server.tool(
+    "lua_run",
+    "Execute a Lua chunk inside MOHO (like Blender's execute code). In scope: moho (the ScriptInterface), " +
+      "doc/document (moho.document), json, and all MOHO/LM globals. return a value to get it back as JSON " +
+      "(tables become objects/arrays, userdata becomes a string); print() output is captured. " +
+      "Lua errors come back as tool errors. Runs as one undo step unless undo is false; chunks are stopped after ~8 s of CPU.",
+    {
+      code: z.string().min(1).describe("Lua source to run"),
+      undo: z
+        .boolean()
+        .optional()
+        .describe("Wrap the run in an undo step and mark the document dirty (default true); set false for read-only queries"),
+    },
+    async ({ code, undo }) => {
+      try {
+        await ensureConnected(client);
+        const result = await client.sendRequest("lua.run", { code, undo });
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // =========================================================================
   // Batch Execution
   // =========================================================================
 
-  // 26. batch.execute — Execute multiple operations in a single IPC round-trip
+  // 30. batch.execute — Execute multiple operations in a single IPC round-trip
   server.tool(
     "batch_execute",
     "Execute multiple MOHO operations in a single IPC round-trip (~300ms total) instead of one round-trip per call (~300ms each). " +
@@ -820,7 +953,8 @@ export function registerTools(server: McpServer, client: MohoClient): void {
       "- Bulk reads: batch document.getInfo + document.getLayers + layer.getProperties for several layers\n" +
       "- Keyframe + easing: batch animation.setKeyframe then animation.setInterpolation for each\n" +
       "- Multi-bone pose: batch bone.setTransform for each bone in a skeleton at the same frame\n" +
-      "- Layer setup: batch layer.setName + layer.setVisibility + layer.setOpacity\n\n" +
+      "- Layer setup: batch layer.setName + layer.setVisibility + layer.setOpacity\n" +
+      "- Drawing: batch layer.create + several shape.draw (or bone.create) calls\n\n" +
       "Returns { results: [{ success, index, result|error }], summary: { total, executed, succeeded, failed, stoppedEarly } }. " +
       "Use stopOnError: true when later operations depend on earlier ones succeeding.",
     {
