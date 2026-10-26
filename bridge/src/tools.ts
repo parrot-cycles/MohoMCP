@@ -61,14 +61,39 @@ async function ensureConnected(client: MohoClient): Promise<void> {
   }
 }
 
+export const SCENE_RENDER_DISABLED_MAC =
+  'document_screenshot mode "scene" is disabled on macOS: Moho crashes when it renders (FileRender) ' +
+  'from inside the MohoMCP poll. Use mode "full" to capture the Moho window instead.';
+
 // ---------------------------------------------------------------------------
 // Tool registration
 // ---------------------------------------------------------------------------
 
+/** lua_run executes arbitrary code inside Moho, so it is opt-in. */
+export const LUA_RUN_ENV = "MOHO_MCP_ENABLE_LUA_RUN";
+
+export function luaRunEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[LUA_RUN_ENV] === "1";
+}
+
+/** Heavy operations allowed per batch; mirrors moho_mcp/tools/batch.lua. */
+export const MAX_HEAVY_OPS_PER_BATCH = 5;
+const HEAVY_METHODS = new Set(["lua.run", "svg.import"]);
+
+export interface RegisterToolsOptions {
+  /** Register lua_run (and allow lua.run in batches). Default: MOHO_MCP_ENABLE_LUA_RUN=1. */
+  enableLuaRun?: boolean;
+}
+
 /**
  * Register all MOHO tools on the given MCP server instance.
  */
-export function registerTools(server: McpServer, client: MohoClient): void {
+export function registerTools(
+  server: McpServer,
+  client: MohoClient,
+  options: RegisterToolsOptions = {},
+): void {
+  const enableLuaRun = options.enableLuaRun ?? luaRunEnabled();
   // 1. document.getInfo — No input params
   server.tool(
     "document_getInfo",
@@ -597,7 +622,8 @@ export function registerTools(server: McpServer, client: MohoClient): void {
   // 22. document.screenshot — Render the scene and return as an image
   server.tool(
     "document_screenshot",
-    'Render the MOHO scene or capture the full application window and return as an image. Use mode "scene" (default) for a clean rendered frame, or "full" for the entire MOHO UI including timeline, layers panel, etc.',
+    'Render the MOHO scene or capture the full application window and return as an image. Use mode "scene" (default) for a clean rendered frame, or "full" for the entire MOHO UI including timeline, layers panel, etc. ' +
+      'On macOS only "full" is available (scene rendering from the plugin crashes Moho).',
     {
       mode: z
         .enum(["scene", "full"])
@@ -662,7 +688,12 @@ export function registerTools(server: McpServer, client: MohoClient): void {
           };
         }
 
-        // Scene mode — use MOHO's FileRender via Lua
+        // Scene mode — use MOHO's FileRender via Lua. On macOS FileRender
+        // inside the plugin's poll crashes Moho (SIGSEGV in
+        // ScriptInterface_FileRender), so refuse before sending anything.
+        if (os.platform() === "darwin") {
+          throw new Error(SCENE_RENDER_DISABLED_MAC);
+        }
         await ensureConnected(client);
         const params: Record<string, unknown> = {};
         if (frame !== undefined) params.frame = frame;
@@ -804,23 +835,200 @@ export function registerTools(server: McpServer, client: MohoClient): void {
   );
 
   // =========================================================================
+  // Phase 4: Creation
+  // =========================================================================
+
+  const layerRef = z
+    .union([z.number().int(), z.string().min(1)])
+    .describe("Layer absolute ID (number) or layer name (string)");
+  const color = z
+    .object({
+      r: z.number().min(0).max(255),
+      g: z.number().min(0).max(255),
+      b: z.number().min(0).max(255),
+      a: z.number().min(0).max(255).optional(),
+    })
+    .describe("RGBA color. Channels 0-1; if any channel is above 1 all are read as 0-255. a defaults to opaque.");
+  const point = z.tuple([z.number(), z.number()]);
+
+  // 26. layer.create — Create a new layer
+  server.tool(
+    "layer_create",
+    "Create a new layer (vector, group or bone) with a name, optionally inside a parent group/bone layer. " +
+      "One undo step. Returns { layerId, name, type, parentId }.",
+    {
+      type: z.enum(["vector", "group", "bone"]).describe("Layer type"),
+      name: z.string().min(1).describe("Name for the new layer"),
+      parent: layerRef.optional().describe("Parent group or bone layer (ID or name); default: where Moho puts new layers"),
+    },
+    async ({ type, name, parent }) => {
+      try {
+        await ensureConnected(client);
+        const result = await client.sendRequest("layer.create", { type, name, parent });
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // 27. shape.draw — Draw a shape from points
+  server.tool(
+    "shape_draw",
+    "Draw a new shape in a vector layer from a list of points in Moho world units " +
+      "(the default 16:9 frame spans about x -1.78..1.78, y -1..1). " +
+      "closed: true makes a polygon that can be filled; otherwise an open stroke. " +
+      "With no fill/stroke given, Moho's current style is used. One undo step. " +
+      "Returns { layerId, layerName, shapeId, pointIds, closed, hasFill, hasOutline }.",
+    {
+      layer: layerRef.optional().describe("Target vector layer (ID or name); default: the current layer"),
+      points: z.array(point).min(2).describe("Points as [[x, y], ...]; at least 3 when closed"),
+      closed: z.boolean().optional().describe("Close the path into a polygon (default false)"),
+      fill: color.optional().describe("Fill color (closed shapes only); omit stroke for a fill without outline"),
+      stroke: color.optional().describe("Outline color"),
+      strokeWidth: z.number().nonnegative().optional().describe("Outline width in pixels"),
+      smooth: z.boolean().optional().describe("Smooth (curved) corners instead of sharp ones (default false)"),
+    },
+    async ({ layer, points, closed, fill, stroke, strokeWidth, smooth }) => {
+      try {
+        await ensureConnected(client);
+        const result = await client.sendRequest("shape.draw", {
+          layer,
+          points,
+          closed,
+          fill,
+          stroke,
+          strokeWidth,
+          smooth,
+        });
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // 28. bone.create — Add a bone to a bone layer
+  server.tool(
+    "bone_create",
+    "Add a bone to a bone layer's rest pose (frame 0). origin is the bone's base in the layer's coordinates; " +
+      "angle is in radians (0 points along +x). One undo step. Returns { layerId, boneId, name, parentId }.",
+    {
+      layer: layerRef.optional().describe("Bone layer (ID or name); default: the current layer"),
+      name: z.string().min(1).describe("Bone name"),
+      origin: point.describe("Base of the bone as [x, y]"),
+      length: z.number().nonnegative().describe("Bone length in world units"),
+      angle: z.number().optional().describe("Bone angle in radians (default 0)"),
+      parent: z
+        .union([z.number().int().nonnegative(), z.string().min(1)])
+        .optional()
+        .describe("Parent bone ID (number) or name (string)"),
+    },
+    async ({ layer, name, origin, length, angle, parent }) => {
+      try {
+        await ensureConnected(client);
+        const result = await client.sendRequest("bone.create", {
+          layer,
+          name,
+          origin,
+          length,
+          angle,
+          parent,
+        });
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // 29. lua.run — Execute Lua inside MOHO. Off unless MOHO_MCP_ENABLE_LUA_RUN=1:
+  // it is arbitrary code execution with the user's permissions.
+  if (enableLuaRun) {
+    server.tool(
+      "lua_run",
+      "Execute a Lua chunk inside MOHO (like Blender's execute code). In scope: moho (the ScriptInterface), " +
+        "doc/document (moho.document), json, and all MOHO/LM globals. return a value to get it back as JSON " +
+        "(tables become objects/arrays, userdata becomes a string); print() output is captured. " +
+        "Lua errors come back as tool errors. Runs as one undo step unless undo is false. Chunks are stopped after ~20 s " +
+        "(between Lua instructions; a single long Moho call cannot be interrupted); the bridge waits up to 30 s. " +
+        "If a call times out its edit may still have been applied: inspect the document before retrying. " +
+        "moho:FileNew/FileOpen/FileClose/FileRender/FileImport/FileImportImageSequence are blocked (they crash Moho from the poll).",
+      {
+        code: z.string().min(1).describe("Lua source to run"),
+        undo: z
+          .boolean()
+          .optional()
+          .describe("Wrap the run in an undo step and mark the document dirty (default true); set false for read-only queries"),
+      },
+      async ({ code, undo }) => {
+        try {
+          await ensureConnected(client);
+          const result = await client.sendRequest(
+            "lua.run",
+            { code, undo },
+            { timeout: config.moho.luaRunTimeout },
+          );
+          return successContent(result);
+        } catch (err) {
+          return errorContent(err);
+        }
+      },
+    );
+  }
+
+  // 30. svg.import — Import an SVG file with Moho's bundled importer
+  server.tool(
+    "svg_import",
+    "Import an SVG file into the current document with Moho's bundled SVG importer (no dialogs). " +
+      "Use this to bring in complex vector art drawn elsewhere. path must be an absolute path to an existing .svg file. " +
+      "One undo step. Returns { path, added: [{ layerId, name, type, parentId }], count }.",
+    {
+      path: z
+        .string()
+        .min(1)
+        .refine((p) => path.isAbsolute(p), "path must be absolute")
+        .refine((p) => p.endsWith(".svg"), "path must end in .svg (lowercase)")
+        .describe("Absolute path to the .svg file"),
+    },
+    async ({ path: svgPath }) => {
+      try {
+        if (!fs.existsSync(svgPath)) {
+          throw new Error(`SVG file not found: ${svgPath}`);
+        }
+        await ensureConnected(client);
+        const result = await client.sendRequest(
+          "svg.import",
+          { path: svgPath },
+          { timeout: config.moho.luaRunTimeout },
+        );
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
+  // =========================================================================
   // Batch Execution
   // =========================================================================
 
-  // 26. batch.execute — Execute multiple operations in a single IPC round-trip
+  // 31. batch.execute — Execute multiple operations in a single IPC round-trip
   server.tool(
     "batch_execute",
     "Execute multiple MOHO operations in a single IPC round-trip (~300ms total) instead of one round-trip per call (~300ms each). " +
       "PREFER THIS over individual calls whenever you have 2+ operations.\n\n" +
       "Method names use DOT notation: \"bone.setTransform\", \"layer.getProperties\", \"animation.setKeyframe\", etc. " +
       "Params match each tool's schema exactly.\n\n" +
-      "Supports all methods EXCEPT: document.screenshot (too slow), batch.execute (no nesting).\n\n" +
+      "Supports all methods EXCEPT: document.screenshot (too slow), batch.execute (no nesting); lua.run only when lua_run is enabled. " +
+      "At most 5 lua.run/svg.import per batch; the whole batch gets 25 s in Moho, later operations are skipped once it is used up.\n\n" +
       "Common patterns:\n" +
       "- Multi-frame animation: batch bone.setTransform across frames 1,5,10,15,...\n" +
       "- Bulk reads: batch document.getInfo + document.getLayers + layer.getProperties for several layers\n" +
       "- Keyframe + easing: batch animation.setKeyframe then animation.setInterpolation for each\n" +
       "- Multi-bone pose: batch bone.setTransform for each bone in a skeleton at the same frame\n" +
-      "- Layer setup: batch layer.setName + layer.setVisibility + layer.setOpacity\n\n" +
+      "- Layer setup: batch layer.setName + layer.setVisibility + layer.setOpacity\n" +
+      "- Drawing: batch layer.create + several shape.draw (or bone.create) calls, or svg.import for complex art\n\n" +
       "Returns { results: [{ success, index, result|error }], summary: { total, executed, succeeded, failed, stoppedEarly } }. " +
       "Use stopOnError: true when later operations depend on earlier ones succeeding.",
     {
@@ -842,10 +1050,21 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     },
     async ({ operations, stopOnError }) => {
       try {
+        if (!enableLuaRun && operations.some((op) => op.method === "lua.run")) {
+          throw new Error(
+            `lua.run is disabled. Set ${LUA_RUN_ENV}=1 in the MCP server's environment to allow it.`,
+          );
+        }
+        const heavy = operations.filter((op) => HEAVY_METHODS.has(op.method)).length;
+        if (heavy > MAX_HEAVY_OPS_PER_BATCH) {
+          throw new Error(
+            `At most ${MAX_HEAVY_OPS_PER_BATCH} lua.run/svg.import operations per batch (got ${heavy}).`,
+          );
+        }
         await ensureConnected(client);
+        // The plugin stops a batch after batchBudgetMs; wait longer than that.
         const timeout =
-          config.moho.requestTimeout +
-          operations.length * config.moho.batchTimeoutPerOp;
+          config.moho.batchBudgetMs + 5000 + operations.length * config.moho.batchTimeoutPerOp;
         const result = await client.sendRequest(
           "batch.execute",
           { operations, stopOnError },

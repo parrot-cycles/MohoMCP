@@ -31,11 +31,12 @@ An MCP (Model Context Protocol) server for **Moho Pro 14** — enabling AI assis
 |------------|-------------|
 | **Read** | Query document structure, layers, bones, animation keyframes, mesh data |
 | **Write** | Set bone/layer transforms, create/delete keyframes, change interpolation, rename layers |
+| **Create** | Create layers, draw filled/stroked shapes, add bones, run arbitrary Lua inside Moho |
 | **See** | Capture rendered scene frames or full MOHO UI screenshots |
 | **Interact** | Send mouse clicks, drags, and keyboard shortcuts to the MOHO window |
 | **Know** | Built-in reference data for all Moho 14 tools and keyboard shortcuts |
 
-## Available Tools (26)
+## Available Tools (31; `lua_run` is opt-in)
 
 ### Read-Only Tools
 
@@ -72,10 +73,20 @@ An MCP (Model Context Protocol) server for **Moho Pro 14** — enabling AI assis
 
 | Tool | Description |
 |------|-------------|
-| `document_screenshot` | Capture scene render or full MOHO UI window as PNG |
+| `document_screenshot` | Capture scene render (Windows) or full MOHO UI window as PNG |
 | `input_mouseClick` | Click at window-relative coordinates (left/right/middle, single/double) |
 | `input_mouseDrag` | Drag from point A to B with configurable steps |
 | `input_sendKeys` | Send keyboard shortcuts (e.g. `ctrl+z`, `space`, `a`) |
+
+### Creation Tools
+
+| Tool | Description |
+|------|-------------|
+| `layer_create` | Create a vector, group or bone layer (optionally inside a parent) |
+| `shape_draw` | Draw a closed (fillable) or open shape from points, with fill/stroke color and width |
+| `bone_create` | Add a named bone (origin, length, angle, optional parent) to a bone layer |
+| `lua_run` | Run a Lua chunk inside Moho with `moho`/`doc` in scope; returns its value as JSON plus `print()` output. **Off unless `MOHO_MCP_ENABLE_LUA_RUN=1`** |
+| `svg_import` | Import an SVG file with Moho's bundled importer (no dialogs); returns the added layers |
 
 ### Batch Execution
 
@@ -96,17 +107,13 @@ An MCP (Model Context Protocol) server for **Moho Pro 14** — enabling AI assis
 
 ### 1. Install the MOHO Plugin
 
-Copy the `moho-plugin/` contents into MOHO's scripts folder, or use the provided install scripts:
+Use the provided install scripts:
 
-**Windows:** Run `install-plugin.bat` (or copy manually to `C:\Program Files\Moho 14\Resources\Support\Scripts\Menu\`)
+**Windows:** Run `install-plugin.bat`. It finds Moho wherever it's installed. If it can't, run `install-plugin.bat "D:\path\to\Moho 14"`.
 
-**macOS:** Run `chmod +x install-plugin.sh && ./install-plugin.sh` (or copy manually to `/Applications/Moho 14/Moho Pro.app/Contents/Resources/Support/Scripts/Menu/`)
+**macOS:** Run `./install-plugin.sh`. By default it installs into your Moho custom content folder, `~/Library/Application Support/Moho/Moho Pro/Scripts` (pass another Scripts folder, or a Moho `.app`, as an argument; writing into the app bundle breaks its code signature). Add `--link` to symlink the files into this checkout instead of copying them, for development: `./install-plugin.sh --link`.
 
-Files to copy:
-- `MohoMCP_Server.lua`
-- `MohoMCP_Poller.lua`
-- `json.lua`
-- `moho_mcp/` (entire directory)
+Don't copy `moho-plugin/` into MOHO's `Scripts/Menu/` folder as a whole. MOHO runs every `.lua` file there at startup. For a manual install, see [docs/installation.md](docs/installation.md#option-b-manual-installation).
 
 ### 2. Build the Bridge Server
 
@@ -121,6 +128,8 @@ npm run build
 1. Open **Moho Pro 14** and load a project
 2. Go to **Scripts > MohoMCP Server** to start the IPC server
 3. Start your MCP client (Claude Desktop or Claude Code) — the bridge auto-connects
+
+> **Updating:** upgrade the bridge and the plugin together, rebuild the bridge, and **restart Moho** — Moho keeps the old plugin in memory until it restarts. A bridge whose IPC protocol does not match the running plugin refuses to connect and says so (see [docs/installation.md](docs/installation.md#updating)).
 
 ### 4. Configure Claude Desktop
 
@@ -158,7 +167,8 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MOHO_MCP_IPC_DIR` | `<system-temp>/moho-mcp` | Directory for file-based IPC communication |
+| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp` (macOS: else `getconf DARWIN_USER_TEMP_DIR`), else `~/.moho-mcp` | Bridge-side override of the IPC directory; the plugin does not read it (created 0700; never the shared `/tmp`) |
+| `MOHO_MCP_ENABLE_LUA_RUN` | unset | Set to `1` to register `lua_run` and allow `lua.run` in batches |
 
 Internal timing (in `bridge/src/config.ts`):
 
@@ -167,6 +177,7 @@ Internal timing (in `bridge/src/config.ts`):
 | Poll interval | 100ms | How often the bridge checks for response files |
 | Request timeout | 10s | Max wait time for a Lua response |
 | Render timeout | 30s | Max wait time for screenshot operations |
+| Lua run timeout | 30s | Max wait for `lua_run` / batches with `lua.run` (chunks stop after 20 s in Moho) |
 | Batch timeout per op | 500ms | Additional timeout per operation in a batch |
 | Max batch size | 50 | Maximum operations per `batch_execute` call |
 
@@ -176,8 +187,8 @@ Internal timing (in `bridge/src/config.ts`):
 
 Communication uses JSON files in the system temp directory (`%TEMP%\moho-mcp\` on Windows, `$TMPDIR/moho-mcp/` on macOS):
 
-1. Bridge writes `req_<id>.json` (JSON-RPC 2.0 request)
-2. MOHO Lua plugin polls for request files via DrawMe/IsEnabled callbacks
+1. Bridge writes `req_<id>.json` (JSON-RPC 2.0 request); `<id>` is a per-process prefix (pid + start time) plus a sequence number, so several bridge processes can share one MOHO
+2. MOHO Lua plugin polls for request files via DrawMe/IsEnabled callbacks, listing the directory with Moho's `BeginFileListing`/`GetNextFile`
 3. Lua processes the request, writes `resp_<id>.json`
 4. Bridge reads the response, cleans up files
 
@@ -185,13 +196,14 @@ Communication uses JSON files in the system temp directory (`%TEMP%\moho-mcp\` o
 
 MOHO only processes Lua callbacks during UI repaints. A background process periodically forces viewport redraws (~4 Hz) to keep the polling loop alive even when the user isn't interacting:
 - **Windows:** PowerShell process calling Win32 `RedrawWindow()`
-- **macOS:** AppleScript process nudging the Moho application
+- **macOS:** a JavaScript-for-Automation helper (`osascript -l JavaScript`) that, while a request file is pending, posts a mouse-moved event to Moho and, if that does not get an answer within ~300 ms, reads the enabled state of the MohoMCP Scripts menu item through the Accessibility API. Nothing comes to the front, nothing is clicked, and Moho is never launched. Both need Accessibility permission for the app that runs your MCP client. See [How waking works](docs/installation.md#how-waking-works-macos).
 
 ### Security
 
 - **Allow-list validation**: Only explicitly registered methods can be called
 - **Parameter validation**: All parameters type-checked before execution
 - **pcall wrapping**: All Lua handlers wrapped in protected calls — a crash in one method won't crash the server
+- **`lua_run` is arbitrary code execution and is off by default**: it runs any Lua (including `io`/`os`) inside MOHO with your user's permissions. Enable it with `MOHO_MCP_ENABLE_LUA_RUN=1` only for MCP clients you trust (see [docs/tool-reference.md](docs/tool-reference.md#lua_run)).
 
 ## Development
 
@@ -199,7 +211,7 @@ MOHO only processes Lua callbacks during UI repaints. A background process perio
 cd bridge
 npm install
 npm run dev      # Watch mode — recompiles on changes
-npm test         # Run test suite (61 tests)
+npm test         # Run bridge and Lua handler tests
 npm run test:watch
 ```
 
@@ -213,7 +225,7 @@ MohoMCP/
 │       ├── config.ts          # IPC directory, timeouts
 │       ├── moho-client.ts     # File-based IPC client
 │       ├── protocol.ts        # JSON-RPC 2.0 types
-│       ├── tools.ts           # 26 MCP tool registrations
+│       ├── tools.ts           # MCP tool registrations (31 with lua_run)
 │       ├── resources.ts       # Static knowledge resources
 │       ├── keep-alive.ts      # Cross-platform viewport refresh
 │       ├── platform-capture.ts # Platform dispatch → window capture
@@ -227,17 +239,21 @@ MohoMCP/
 ├── moho-plugin/               # Lua Plugin for MOHO 14
 │   ├── MohoMCP_Server.lua     # Menu script & DrawMe hooks
 │   ├── MohoMCP_Poller.lua     # Polling utilities
-│   ├── json.lua               # JSON library
-│   └── moho_mcp/
+│   └── moho_mcp/              # Installed to Scripts/Modules/moho_mcp/
+│       ├── json.lua           # JSON library
 │       ├── server.lua         # File-based IPC server
 │       ├── protocol.lua       # JSON-RPC 2.0 protocol
 │       ├── validator.lua      # Method allow-list & validation
+│       ├── edit.lua           # Shared helpers for creation tools (undo, colors, layer lookup)
 │       └── tools/             # Handler implementations
 │           ├── document.lua
 │           ├── layer.lua
 │           ├── bone.lua
 │           ├── animation.lua
 │           ├── mesh.lua
+│           ├── shape.lua      # shape.draw
+│           ├── script.lua     # lua.run
+│           ├── svg.lua        # svg.import
 │           └── batch.lua
 │
 ├── docs/                      # Documentation
@@ -250,17 +266,17 @@ MohoMCP/
 
 ## Platform Support
 
-All 26 tools work identically on both platforms. The bridge auto-detects the OS at runtime and loads the appropriate native backend — no configuration needed.
+All tools work on both platforms, except scene-mode screenshots, which are disabled on macOS (see below). The bridge auto-detects the OS at runtime and loads the appropriate native backend — no configuration needed.
 
 | Feature | Windows | macOS |
 |---------|---------|-------|
 | Read tools (document, layers, bones, mesh) | Win32 file IPC | POSIX file IPC |
 | Write tools (transforms, keyframes) | Win32 file IPC | POSIX file IPC |
-| Scene screenshot (`mode="scene"`) | Moho FileRender | Moho FileRender |
+| Scene screenshot (`mode="scene"`) | Moho FileRender | Disabled (FileRender from the plugin crashes Moho); use `mode="full"` |
 | Full UI screenshot (`mode="full"`) | Win32 PrintWindow API | `screencapture -l` |
 | Mouse input (click, drag) | Win32 user32.dll P/Invoke | cliclick / CoreGraphics via JXA |
 | Keyboard input | Win32 keybd_event | AppleScript System Events |
-| Keep-alive (viewport refresh) | PowerShell + RedrawWindow | AppleScript process nudge |
+| Keep-alive (viewport refresh) | PowerShell + RedrawWindow | JXA helper: mouse-moved event to Moho's pid, then an Accessibility read of the MohoMCP menu item |
 | Plugin installer | `install-plugin.bat` | `install-plugin.sh` |
 
 ### Windows Requirements

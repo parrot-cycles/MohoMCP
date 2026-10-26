@@ -5,12 +5,18 @@
 
 local server = {}
 
+-- IPC protocol version, written to status.json and checked by the bridge.
+-- 2 = per-process request ID prefixes (needs the directory listing below).
+-- Bump whenever bridge and plugin must be upgraded together.
+server.PROTOCOL_VERSION = 2
+
 -- Dependencies (set by init)
 local protocol = nil
 local validator = nil
 
 -- Server state
 local isRunning = false
+local isPolling = false
 local ipcDir = ""
 
 -- Tool handler registry: method name -> function(moho, params) -> result, err
@@ -43,10 +49,24 @@ end
 
 --- Get the IPC directory path.
 -- Uses TEMP/moho-mcp/ on Windows, /tmp/moho-mcp/ on others.
-local function getIpcDir()
-    local tmp = os.getenv("TEMP") or os.getenv("TMP") or os.getenv("TMPDIR") or "/tmp"
-    return tmp .. SEP .. "moho-mcp" .. SEP
+-- Per-user only: never the shared /tmp. Same order as the bridge
+-- (bridge/src/config.ts defaultIpcDir): TEMP, TMP, TMPDIR, then $HOME/.moho-mcp.
+local function nonEmpty(v)
+    if v ~= nil and v ~= "" then return v end
+    return nil
 end
+local function getIpcDir()
+    local tmp = nonEmpty(os.getenv("TEMP")) or nonEmpty(os.getenv("TMP")) or nonEmpty(os.getenv("TMPDIR"))
+    if tmp then
+        return tmp .. SEP .. "moho-mcp" .. SEP
+    end
+    local home = nonEmpty(os.getenv("HOME")) or nonEmpty(os.getenv("USERPROFILE"))
+    if home then
+        return home .. SEP .. ".moho-mcp" .. SEP
+    end
+    return nil
+end
+server._getIpcDir = getIpcDir
 
 --- Check if a file exists by trying to open it.
 local function fileExists(path)
@@ -94,20 +114,48 @@ local function mkdirp(path)
     if SEP == "\\" then
         cmd = 'cmd /c mkdir "' .. path .. '" 2>NUL'
     else
-        cmd = 'mkdir -p "' .. path .. '" 2>/dev/null'
+        -- 0700: only this user may read or plant requests.
+        cmd = 'mkdir -p -m 700 "' .. path .. '" 2>/dev/null'
     end
     local handle = io.popen(cmd)
     if handle then handle:close() end
 end
 
---- Find request/response files by probing for known ID patterns.
---- Pure Lua — no shell commands, no visible windows.
---- The bridge uses incrementing integer IDs (1, 2, 3, …) so we
---- scan a range of IDs and check if the file exists via io.open.
---- Scan a fixed window of IDs starting from 1.
---- On modern SSDs, probing ~200 files via io.open is <5ms.
---- The bridge resets its counter on restart, so IDs are typically low.
-local function findFilesByPrefix(dir, prefix)
+--- List request/response files in the IPC directory.
+--- Bridge request IDs are digits-only but not small: each bridge process uses
+--- its own large prefix (pid + start time) so concurrent bridges never collide.
+--- Probing IDs from 1 cannot find those, so list the directory with Moho's own
+--- file listing API (BeginFileListing/GetNextFile, as used by
+--- Scripts/Menu/Script Writing/lm_automation.lua and Tool/lm_scatterbrush.lua).
+--- No shell commands, so no visible windows on Windows.
+local MAX_LISTED_FILES = 10000
+
+local function listFilesWithMoho(moho, dir, prefix)
+    if moho == nil then return nil end
+    local ok, files = pcall(function()
+        local found = {}
+        local pattern = "^" .. prefix .. "%d+%.json$"
+        moho:BeginFileListing(dir)
+        local name = moho:GetNextFile()
+        local seen = 0
+        while name ~= nil and seen < MAX_LISTED_FILES do
+            seen = seen + 1
+            -- Some platforms may return a full path; keep only the file name.
+            name = tostring(name):match("([^/\\]+)$") or name
+            if name:match(pattern) then
+                found[#found + 1] = name
+            end
+            name = moho:GetNextFile()
+        end
+        return found
+    end)
+    if ok then return files end
+    return nil
+end
+
+--- Fallback when no Moho listing API is available: probe small IDs.
+--- Only finds IDs 1..~100, which is what pre-prefix bridges produced.
+local function probeFilesByPrefix(dir, prefix)
     local files = {}
     local misses = 0
     for id = 1, 10000 do
@@ -119,7 +167,6 @@ local function findFilesByPrefix(dir, prefix)
             misses = 0
         else
             misses = misses + 1
-            -- Stop after 100 consecutive misses (covers any reasonable gap)
             if misses > 100 then
                 break
             end
@@ -128,59 +175,32 @@ local function findFilesByPrefix(dir, prefix)
     return files
 end
 
---- One-time wide scan to discover the current bridge ID range.
---- Called once at server start. Uses io.popen (single cmd window, one time only).
-local function discoverCurrentIdRange(dir)
-    local cmd
-    if SEP == "\\" then
-        cmd = 'cmd /c dir /b "' .. dir .. 'req_*.json" 2>NUL'
-    else
-        cmd = 'ls -1 "' .. dir .. '"req_*.json 2>/dev/null'
-    end
-    local handle = io.popen(cmd)
-    if handle then
-        for line in handle:lines() do
-            local id = line:match("req_(%d+)%.json")
-            if id then
-                local numId = tonumber(id)
-                if numId and numId > lastSeenMaxId then
-                    lastSeenMaxId = numId
-                end
-            end
-        end
-        handle:close()
-    end
-    -- Also check response files for ID range
-    if SEP == "\\" then
-        cmd = 'cmd /c dir /b "' .. dir .. 'resp_*.json" 2>NUL'
-    else
-        cmd = 'ls -1 "' .. dir .. '"resp_*.json 2>/dev/null'
-    end
-    handle = io.popen(cmd)
-    if handle then
-        for line in handle:lines() do
-            local id = line:match("resp_(%d+)%.json")
-            if id then
-                local numId = tonumber(id)
-                if numId and numId > lastSeenMaxId then
-                    lastSeenMaxId = numId
-                end
-            end
-        end
-        handle:close()
-    end
-    print("[MohoMCP] Discovered max ID: " .. tostring(lastSeenMaxId))
+--- Find req_<digits>.json / resp_<digits>.json files, oldest sequence first.
+local function findFilesByPrefix(dir, prefix, moho)
+    local files = listFilesWithMoho(moho, dir, prefix) or probeFilesByPrefix(dir, prefix)
+    -- Digits-only IDs: compare by length, then lexically (exact for any size).
+    local function key(fname) return fname:match("(%d+)%.json$") or "" end
+    table.sort(files, function(a, b)
+        local ka, kb = key(a), key(b)
+        if #ka ~= #kb then return #ka < #kb end
+        return ka < kb
+    end)
+    return files
 end
 
 --- Start the file-based IPC server.
+-- @param moho  Optional ScriptInterface, used to list stale IPC files
 -- @return boolean  true if started successfully
 -- @return string|nil  Error message on failure
-function server.start()
+function server.start(moho)
     if isRunning then
         return true
     end
 
     ipcDir = getIpcDir()
+    if not ipcDir then
+        return false, "No per-user directory for IPC: TEMP, TMP, TMPDIR and HOME are all unset"
+    end
     mkdirp(ipcDir)
 
     -- Verify directory is accessible
@@ -192,11 +212,11 @@ function server.start()
     os.remove(testPath)
 
     -- Clean up any stale request/response files from previous sessions
-    local staleReqs = findFilesByPrefix(ipcDir, "req_")
+    local staleReqs = findFilesByPrefix(ipcDir, "req_", moho)
     for _, fname in ipairs(staleReqs) do
         os.remove(ipcDir .. fname)
     end
-    local staleResps = findFilesByPrefix(ipcDir, "resp_")
+    local staleResps = findFilesByPrefix(ipcDir, "resp_", moho)
     for _, fname in ipairs(staleResps) do
         os.remove(ipcDir .. fname)
     end
@@ -206,6 +226,7 @@ function server.start()
         running = true,
         pid = "moho",
         version = "0.1.0",
+        protocol = server.PROTOCOL_VERSION,
         startedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     }))
 
@@ -215,7 +236,8 @@ function server.start()
 end
 
 --- Stop the IPC server.
-function server.stop()
+-- @param moho  Optional ScriptInterface, used to list remaining IPC files
+function server.stop(moho)
     if not isRunning then
         return
     end
@@ -224,11 +246,11 @@ function server.stop()
     os.remove(ipcDir .. "status.json")
 
     -- Clean up any remaining files
-    local reqs = findFilesByPrefix(ipcDir, "req_")
+    local reqs = findFilesByPrefix(ipcDir, "req_", moho)
     for _, fname in ipairs(reqs) do
         os.remove(ipcDir .. fname)
     end
-    local resps = findFilesByPrefix(ipcDir, "resp_")
+    local resps = findFilesByPrefix(ipcDir, "resp_", moho)
     for _, fname in ipairs(resps) do
         os.remove(ipcDir .. fname)
     end
@@ -297,13 +319,13 @@ end
 -- Call this from the Run or OnIdle callback.
 -- Processes at most a few requests per call to avoid blocking the UI.
 -- @param moho  The MOHO ScriptInterface object
-function server.poll(moho)
+local function pollRequests(moho)
     if not isRunning then
         return
     end
 
     -- Look for request files (req_*.json)
-    local reqFiles = findFilesByPrefix(ipcDir, "req_")
+    local reqFiles = findFilesByPrefix(ipcDir, "req_", moho)
 
     -- Process at most 2 requests per poll to keep UI responsive
     local processed = 0
@@ -326,7 +348,7 @@ function server.poll(moho)
             end
 
             -- Extract request ID from filename: req_<id>.json -> resp_<id>.json
-            local reqId = fname:match("^req_(.+)%.json$")
+            local reqId = fname:match("^req_(%d+)%.json$")
             if reqId then
                 local respPath = ipcDir .. "resp_" .. reqId .. ".json"
                 writeFile(respPath, response)
@@ -337,6 +359,23 @@ function server.poll(moho)
             processed = processed + 1
         end
     end
+end
+
+-- Rendering and UI updates can synchronously invoke DrawMe/IsEnabled again.
+-- Never dispatch the same in-flight request from a nested callback.
+function server.poll(moho)
+    if not isRunning or isPolling then return end
+    isPolling = true
+    local ok, err = pcall(pollRequests, moho)
+    -- Write handlers ask for a UI refresh via moho_mcp.edit; do it once,
+    -- still under the guard, so nested DrawMe/IsEnabled calls return early.
+    local edit = package.loaded["moho_mcp.edit"]
+    if type(edit) == "table" and edit.uiDirty then
+        edit.uiDirty = false
+        pcall(function() moho:UpdateUI() end)
+    end
+    isPolling = false
+    if not ok then error(err) end
 end
 
 --- Get server info for status display.

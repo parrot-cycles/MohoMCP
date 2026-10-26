@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { registerTools } from "../tools.js";
+import { z } from "zod";
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import { registerTools, luaRunEnabled, MAX_HEAVY_OPS_PER_BATCH } from "../tools.js";
 import { MohoClient } from "../moho-client.js";
 
 // ---------------------------------------------------------------------------
@@ -62,13 +66,40 @@ describe("registerTools", () => {
     ).not.toThrow();
   });
 
-  it("registers exactly 26 tools", () => {
-    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
-    expect(mockServer.tools).toHaveLength(26);
+  it("registers 30 tools and no lua_run by default", () => {
+    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: false });
+    expect(mockServer.tools).toHaveLength(30);
+    expect(mockServer.tools.map((t) => t.name)).not.toContain("lua_run");
+  });
+
+  it("registers lua_run (31 tools) only when enabled", () => {
+    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: true });
+    expect(mockServer.tools).toHaveLength(31);
+    expect(mockServer.tools.map((t) => t.name)).toContain("lua_run");
+  });
+
+  it("reads the opt-in flag from MOHO_MCP_ENABLE_LUA_RUN=1 only", () => {
+    expect(luaRunEnabled({})).toBe(false);
+    expect(luaRunEnabled({ MOHO_MCP_ENABLE_LUA_RUN: "0" })).toBe(false);
+    expect(luaRunEnabled({ MOHO_MCP_ENABLE_LUA_RUN: "true" })).toBe(false);
+    expect(luaRunEnabled({ MOHO_MCP_ENABLE_LUA_RUN: "1" })).toBe(true);
+    const saved = process.env.MOHO_MCP_ENABLE_LUA_RUN;
+    try {
+      delete process.env.MOHO_MCP_ENABLE_LUA_RUN;
+      registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
+      expect(mockServer.tools.map((t) => t.name)).not.toContain("lua_run");
+      process.env.MOHO_MCP_ENABLE_LUA_RUN = "1";
+      const other = createMockMcpServer();
+      registerTools(other as unknown as Parameters<typeof registerTools>[0], client);
+      expect(other.tools.map((t) => t.name)).toContain("lua_run");
+    } finally {
+      if (saved === undefined) delete process.env.MOHO_MCP_ENABLE_LUA_RUN;
+      else process.env.MOHO_MCP_ENABLE_LUA_RUN = saved;
+    }
   });
 
   it("registers all expected tool names", () => {
-    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
+    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: true });
 
     const names = mockServer.tools.map((t) => t.name);
 
@@ -102,6 +133,13 @@ describe("registerTools", () => {
     expect(names).toContain("input_mouseClick");
     expect(names).toContain("input_mouseDrag");
     expect(names).toContain("input_sendKeys");
+
+    // Creation tools
+    expect(names).toContain("layer_create");
+    expect(names).toContain("shape_draw");
+    expect(names).toContain("bone_create");
+    expect(names).toContain("lua_run");
+    expect(names).toContain("svg_import");
   });
 
   it("each tool has a non-empty description", () => {
@@ -119,6 +157,7 @@ describe("registerTools", () => {
       registerTools(
         mockServer as unknown as Parameters<typeof registerTools>[0],
         client,
+        { enableLuaRun: true },
       );
     });
 
@@ -228,6 +267,160 @@ describe("registerTools", () => {
           frame: 10,
         },
       );
+    });
+
+    function parse(name: string, input: unknown) {
+      return z.object(findTool(name).schema as z.ZodRawShape).safeParse(input);
+    }
+
+    it("lua_run forwards code and the undo flag with the longer lua timeout", async () => {
+      await findTool("lua_run").handler({ code: "return 1", undo: false });
+      expect(client.sendRequest).toHaveBeenCalledWith(
+        "lua.run",
+        { code: "return 1", undo: false },
+        { timeout: 30000 },
+      );
+    });
+
+    it("batch_execute waits longer than the plugin's 25 s batch budget", async () => {
+      const batch = findTool("batch_execute");
+      await batch.handler({ operations: [{ method: "layer.create" }, { method: "lua.run" }], stopOnError: false });
+      expect(client.sendRequest).toHaveBeenLastCalledWith(
+        "batch.execute",
+        expect.anything(),
+        { timeout: 25000 + 5000 + 2 * 500 },
+      );
+      await batch.handler({ operations: [{ method: "layer.create" }], stopOnError: false });
+      expect(client.sendRequest).toHaveBeenLastCalledWith(
+        "batch.execute",
+        expect.anything(),
+        { timeout: 25000 + 5000 + 500 },
+      );
+    });
+
+    it("batch_execute refuses more than 5 lua.run/svg.import operations", async () => {
+      const ops = Array.from({ length: MAX_HEAVY_OPS_PER_BATCH + 1 }, (_, i) => ({
+        method: i % 2 ? "lua.run" : "svg.import",
+      }));
+      const r = (await findTool("batch_execute").handler({ operations: ops, stopOnError: false })) as {
+        isError?: boolean; content: Array<{ text: string }>;
+      };
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain("At most 5");
+      expect(client.sendRequest).not.toHaveBeenCalled();
+    });
+
+    it("batch_execute refuses lua.run when lua_run is disabled", async () => {
+      const off = createMockMcpServer();
+      registerTools(off as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: false });
+      const batch = off.tools.find((t) => t.name === "batch_execute")!;
+      const r = (await batch.handler({ operations: [{ method: "lua.run", params: { code: "return 1" } }], stopOnError: false })) as {
+        isError?: boolean; content: Array<{ text: string }>;
+      };
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain("MOHO_MCP_ENABLE_LUA_RUN=1");
+      expect(client.sendRequest).not.toHaveBeenCalled();
+    });
+
+    it("lua_run requires non-empty code", () => {
+      expect(parse("lua_run", { code: "return 1" }).success).toBe(true);
+      expect(parse("lua_run", { code: "" }).success).toBe(false);
+      expect(parse("lua_run", {}).success).toBe(false);
+    });
+
+    it("shape_draw forwards points, style and layer to shape.draw", async () => {
+      const args = {
+        layer: "Ink",
+        points: [[0, 0], [1, 0], [1, 1]],
+        closed: true,
+        fill: { r: 1, g: 0, b: 0 },
+        stroke: { r: 0, g: 0, b: 0, a: 1 },
+        strokeWidth: 4,
+        smooth: true,
+      };
+      await findTool("shape_draw").handler(args);
+      expect(client.sendRequest).toHaveBeenCalledWith("shape.draw", args);
+    });
+
+    it("shape_draw validates points, colors and width", () => {
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]] }).success).toBe(true);
+      expect(parse("shape_draw", { layer: 3, points: [[0, 0], [1, 1]], fill: { r: 255, g: 0, b: 0, a: 128 } }).success).toBe(true);
+      expect(parse("shape_draw", { points: [[0, 0]] }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1]] }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], fill: { r: 300, g: 0, b: 0 } }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], stroke: { r: 1, g: 0 } }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], strokeWidth: -1 }).success).toBe(false);
+      expect(parse("shape_draw", { points: [[0, 0], [1, 1]], layer: 1.5 }).success).toBe(false);
+    });
+
+    it("layer_create forwards to layer.create and allows only supported types", async () => {
+      await findTool("layer_create").handler({ type: "vector", name: "Ink", parent: "Group" });
+      expect(client.sendRequest).toHaveBeenCalledWith("layer.create", { type: "vector", name: "Ink", parent: "Group" });
+      for (const type of ["vector", "group", "bone"]) {
+        expect(parse("layer_create", { type, name: "L" }).success).toBe(true);
+      }
+      expect(parse("layer_create", { type: "image", name: "L" }).success).toBe(false);
+      expect(parse("layer_create", { type: "vector", name: "" }).success).toBe(false);
+      expect(parse("layer_create", { type: "vector" }).success).toBe(false);
+    });
+
+    it("bone_create forwards to bone.create and validates its params", async () => {
+      const args = { layer: 2, name: "arm", origin: [0, 0.5], length: 0.4, angle: 1.57, parent: "torso" };
+      await findTool("bone_create").handler(args);
+      expect(client.sendRequest).toHaveBeenCalledWith("bone.create", args);
+      expect(parse("bone_create", { name: "a", origin: [0, 0], length: 1 }).success).toBe(true);
+      expect(parse("bone_create", { name: "a", origin: [0, 0], length: -1 }).success).toBe(false);
+      expect(parse("bone_create", { name: "a", origin: [0], length: 1 }).success).toBe(false);
+      expect(parse("bone_create", { name: "a", origin: [0, 0], length: 1, parent: -1 }).success).toBe(false);
+      expect(parse("bone_create", { origin: [0, 0], length: 1 }).success).toBe(false);
+    });
+
+    it("new tools report MOHO errors as tool errors", async () => {
+      (client.sendRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("MOHO error [-32603]: Lua error: boom"),
+      );
+      const result = (await findTool("lua_run").handler({ code: "error('boom')" })) as {
+        isError?: boolean;
+        content: Array<{ text: string }>;
+      };
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("boom");
+    });
+
+    it("document_screenshot scene mode refuses on macOS without contacting Moho", async () => {
+      const spy = vi.spyOn(os, "platform").mockReturnValue("darwin");
+      try {
+        const result = (await findTool("document_screenshot").handler({})) as {
+          isError?: boolean;
+          content: Array<{ text: string }>;
+        };
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('mode "full"');
+        expect(client.sendRequest).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("svg_import validates the path and forwards existing files to svg.import", async () => {
+      expect(parse("svg_import", { path: "/tmp/a.svg" }).success).toBe(true);
+      expect(parse("svg_import", { path: "a.svg" }).success).toBe(false);
+      expect(parse("svg_import", { path: "/tmp/a.SVG" }).success).toBe(false);
+      expect(parse("svg_import", {}).success).toBe(false);
+
+      const missing = (await findTool("svg_import").handler({ path: "/nonexistent/x.svg" })) as { isError?: boolean };
+      expect(missing.isError).toBe(true);
+      expect(client.sendRequest).not.toHaveBeenCalled();
+
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "moho-svg-test-"));
+      const file = path.join(dir, "logo.svg");
+      fs.writeFileSync(file, "<svg xmlns='http://www.w3.org/2000/svg'/>");
+      try {
+        await findTool("svg_import").handler({ path: file });
+        expect(client.sendRequest).toHaveBeenCalledWith("svg.import", { path: file }, { timeout: 30000 });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

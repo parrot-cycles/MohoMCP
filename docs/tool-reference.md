@@ -1,6 +1,6 @@
 # MohoMCP Tool Reference
 
-Complete reference for all 26 MCP tools and 2 knowledge resources.
+Complete reference for all 31 MCP tools (30 unless `lua_run` is enabled) and 2 knowledge resources.
 
 ---
 
@@ -96,7 +96,7 @@ Render the MOHO scene or capture the full application window as a PNG image.
 ```
 
 **Notes:**
-- `mode="scene"` uses MOHO's `FileRender` API for a clean render without UI elements
+- `mode="scene"` uses MOHO's `FileRender` API for a clean render without UI elements. **Disabled on macOS:** `FileRender` called from inside the MohoMCP poll crashes Moho, so the tool returns an error pointing to `mode="full"`
 - `mode="full"` uses Win32 `PrintWindow` to capture the entire application window including timeline, layers panel, toolbar, etc.
 - Full mode is useful for identifying UI element positions before using `input_mouseClick`
 
@@ -530,6 +530,150 @@ See the `moho://shortcuts` resource for the complete shortcut reference.
 
 ---
 
+## Creation Tools
+
+All creation tools are single undo steps (`PrepUndo` + `SetDirty`, as Moho's own scripts do) and refresh the MOHO UI once after the request. Wherever a `layer` is accepted it may be an absolute layer ID (number) or a layer name (string, first match depth-first); omitted means the current layer.
+
+### `layer_create`
+
+Create a new layer.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `type` | string | Yes | `"vector"`, `"group"` or `"bone"` |
+| `name` | string | Yes | Name for the new layer |
+| `parent` | number \| string | No | Group or bone layer to place the new layer in (ID or name) |
+
+**Returns:**
+```json
+{ "layerId": 7, "name": "Face", "type": "vector", "parentId": 3 }
+```
+`parentId` is the layer's actual parent after creation (`-1` at the top level). Without `parent`, Moho creates the layer next to the current layer, which may be inside a group.
+
+---
+
+### `shape_draw`
+
+Draw a new shape from points in a vector layer. Points are in Moho world units: the default 16:9 frame spans about x −1.78…1.78 and y −1…1, with +y up.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `layer` | number \| string | No | Target vector layer (default: current layer) |
+| `points` | `[[x, y], ...]` | Yes | At least 2 points (3 when `closed`) |
+| `closed` | boolean | No | Close the path into a fillable polygon (default `false`) |
+| `fill` | `{r, g, b, a?}` | No | Fill color; closed shapes only. Without `stroke`, the shape has no outline |
+| `stroke` | `{r, g, b, a?}` | No | Outline color |
+| `strokeWidth` | number | No | Outline width in pixels (stored as width / document height) |
+| `smooth` | boolean | No | Smooth (curved) corners instead of sharp ones (default `false`) |
+
+Colors use channels 0–1; if any channel is above 1 the whole color is read as 0–255. `a` defaults to opaque. With neither `fill` nor `stroke`, MOHO's current style is used (closed: fill + outline; open: outline). The target layer is made current while drawing (Moho creates shapes on the current layer) and the previous current layer is restored afterwards, also when drawing fails. The target layer's point selection is cleared: it is emptied before drawing, so other selected points cannot join the new shape, and again afterwards.
+
+**Returns:**
+```json
+{
+  "layerId": 7, "layerName": "Face", "shapeId": 0,
+  "pointIds": [0, 1, 2], "closed": true, "hasFill": true, "hasOutline": false
+}
+```
+
+---
+
+### `bone_create`
+
+Add a bone to a bone layer's rest pose (frame 0).
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `layer` | number \| string | No | Bone layer (default: current layer) |
+| `name` | string | Yes | Bone name |
+| `origin` | `[x, y]` | Yes | Base of the bone in the layer's coordinates |
+| `length` | number | Yes | Bone length (world units, ≥ 0) |
+| `angle` | number | No | Angle in radians, 0 = +x (default 0) |
+| `parent` | number \| string | No | Parent bone ID or name; the bone is stored in the parent's space |
+
+**Returns:**
+```json
+{ "layerId": 3, "boneId": 1, "name": "thigh", "parentId": 0 }
+```
+
+---
+
+### `lua_run`
+
+**`lua_run` is off by default.** It runs arbitrary Lua inside Moho (including `io` and `os`, so file and shell access) with your user's permissions, so a prompt-injected or misbehaving client could do anything a Moho script can. The bridge registers it, and lets `batch_execute` run `lua.run`, only when it is started with `MOHO_MCP_ENABLE_LUA_RUN=1`:
+
+```bash
+# Claude Code
+claude mcp add --scope user moho-mcp -e MOHO_MCP_ENABLE_LUA_RUN=1 -- node /path/to/MohoMCP/bridge/dist/index.js
+```
+
+```toml
+# Codex (~/.codex/config.toml)
+[mcp_servers.moho-mcp.env]
+MOHO_MCP_ENABLE_LUA_RUN = "1"
+```
+
+For Claude Desktop add `"env": { "MOHO_MCP_ENABLE_LUA_RUN": "1" }` to the server entry. Restart the client afterwards.
+
+Execute a Lua chunk inside MOHO, the equivalent of Blender MCP's `execute_blender_code`. In scope: `moho` (the ScriptInterface of the current callback), `doc` / `document` (`moho.document`), `json`, and all MOHO globals (`MOHO`, `LM`, ...). Globals assigned by the chunk stay in a per-call environment.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `code` | string | Yes | Lua source |
+| `undo` | boolean | No | Wrap the run in an undo step and mark the document dirty (default `true`); pass `false` for read-only queries |
+
+**Returns:**
+```json
+{ "result": { "layers": 4 }, "output": "printed lines\nseparated by newlines" }
+```
+`result` is the chunk's return value (several values become an array; none becomes `null`). Tables become arrays (keys 1..n) or objects; userdata, functions and threads become `tostring()` strings. `print()` output is captured (up to 64 KB). A Lua error is returned as JSON-RPC error `-32603` whose message holds the Lua error and any output printed before it; the server keeps running. A chunk is stopped after about 20 s of wall-clock time (checked between Lua instructions, so one long call into Moho, such as a render, cannot be interrupted). Captured output is capped at 64 KB and the serialized result at about 1 MB; either cut adds a `…[truncated]` marker and `"truncated": true` to the response.
+
+The bridge waits up to 30 s for `lua_run` (and for a `batch_execute` that contains `lua.run`), which includes waiting for Moho to repaint and pick the request up. **A `lua_run` that timed out on the bridge side may still have run and applied its edit afterwards** — inspect the document (or undo) before retrying, or the edit can be applied twice.
+
+**Gaps in the time limit.** The limit is a debug hook on the main Lua thread, checked every 100,000 instructions. It does not apply inside coroutines the chunk creates (hooks are per thread), it cannot interrupt one long call into Moho, and a chunk that wraps its loop in `pcall` and keeps going swallows the limit error each time it fires. Such a chunk can still freeze Moho.
+
+**Example:**
+```lua
+local n = 0
+for i = 0, doc:CountLayers() - 1 do n = n + 1 end
+print("top-level layers:", n)
+return { layers = n, current = moho.layer:Name() }
+```
+
+**Blocked inside a chunk:** `moho:FileNew`, `FileOpen`, `FileClose`, `FileRender`, `FileImport` and `FileImportImageSequence` raise a Lua error for the duration of the chunk: called from inside the MohoMCP poll they crash Moho (seen live for `FileNew` and `FileRender`). They are blocked on Moho's class, so the real `moho` object can still be passed to other scripts (for example `SS_SVGImport:Run(moho)`). `FileSave` / `FileSaveAs` are allowed but untested inside the poll.
+
+> `lua_run` can do anything a Moho script can, including file and shell access through `io`/`os`.
+
+---
+
+### `svg_import`
+
+Import an SVG file into the current document with Moho's bundled SVG importer (`SS_SVGImport`, `Tool/ss_svg_import14.lua`), without its file and options dialogs. Good for complex vector art drawn elsewhere.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | string | Yes | Absolute path to an existing file ending in `.svg` (lowercase) |
+
+**Returns:**
+```json
+{
+  "path": "/Users/me/art/logo.svg",
+  "added": [
+    { "layerId": 0, "name": "logo.svg", "type": "group", "parentId": -1 },
+    { "layerId": 1, "name": "path1", "type": "vector", "parentId": 0 }
+  ],
+  "count": 2
+}
+```
+`added` lists every layer that exists after the import but not before, compared by layer UUID since absolute IDs shift when layers are inserted. If `UUID()` is unavailable, layers are matched by their name path and type instead; then an imported layer with exactly the same path and type as an existing one may be reported in place of the existing one (the count stays right). Import options (scale, minify, etc.) are whatever was last saved in the importer's own dialog (its `SS_SVGImport` preferences); only the file and options dialogs are skipped. The importer creates its own undo step. An import that adds nothing is reported as an error. **Known limit:** there is no time limit while one import runs (the importer is one long call), so a very large SVG blocks Moho until it finishes, and a batch of several slow imports can run past the bridge's wait (30 s for a single import; 25 s + 5 s + 0.5 s per operation for a batch). The batch budget is only checked between operations. If the bridge times out, the import may still finish and add its layers. The importer's `OpenFile` hook and `hideDialog`/`browseFirst` settings are restored afterwards, also on failure.
+
+---
+
 ## Batch Execution
 
 ### `batch_execute`
@@ -549,7 +693,9 @@ Each operation in the array:
 | `params` | object | No | Parameters for the method (matches the individual tool's schema) |
 
 **Restrictions:**
-- Maximum 50 operations per batch
+- Maximum 50 operations per batch, and at most 5 of them `lua.run`/`svg.import`
+- A batch has a 25 s time budget in Moho: it is checked between operations, later operations are skipped once it is used up (`summary.timeBudgetExhausted`), and a `lua.run` inside a batch only gets the time that is left. The bridge waits 30 s plus 0.5 s per operation
+- `lua.run` is refused unless `lua_run` is enabled (`MOHO_MCP_ENABLE_LUA_RUN=1`)
 - `document.screenshot` is not allowed (too heavyweight)
 - `batch.execute` cannot be nested
 

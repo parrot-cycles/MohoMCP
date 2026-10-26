@@ -42,7 +42,7 @@ end
 -- Helpers
 -- **************************************************
 
---- Determine the directory this script lives in so we can load siblings.
+--- Determine the directory this script lives in so we can find Scripts/Modules.
 local function getScriptDir()
 	local info = debug.getinfo(1, "S")
 	local path = info.source
@@ -73,10 +73,16 @@ local function loadModules(baseDir)
 		return true
 	end
 
+	-- Modules live in Scripts/Modules, not next to this script: Moho runs every
+	-- .lua file under Scripts/Menu as a menu script at startup.
+	-- Also search this script's own folder: when Menu/MohoMCP/MohoMCP_Server.lua
+	-- is a symlink into a checkout (install-plugin.sh --link) and Moho reports
+	-- the resolved path, moho_mcp/ sits right next to it in moho-plugin/.
 	setupPackagePath(baseDir)
+	setupPackagePath(baseDir .. "../../Modules/")
 
 	-- Load the JSON library and make it globally available
-	local jsonOk, jsonMod = pcall(require, "json")
+	local jsonOk, jsonMod = pcall(require, "moho_mcp.json")
 	if not jsonOk then
 		print("[MohoMCP] ERROR: Failed to load json.lua: " .. tostring(jsonMod))
 		return false
@@ -108,10 +114,13 @@ local function loadModules(baseDir)
 	-- Load tool handlers
 	local toolModules = {
 		{ name = "moho_mcp.tools.document",  methods = { "document.getInfo", "document.getLayers", "document.setFrame", "document.screenshot" } },
-		{ name = "moho_mcp.tools.layer",     methods = { "layer.getProperties", "layer.getChildren", "layer.getBones", "layer.setTransform", "layer.setVisibility", "layer.setOpacity", "layer.setName", "layer.selectLayer" } },
-		{ name = "moho_mcp.tools.bone",      methods = { "bone.getProperties", "bone.setTransform", "bone.selectBone" } },
+		{ name = "moho_mcp.tools.layer",     methods = { "layer.getProperties", "layer.getChildren", "layer.getBones", "layer.setTransform", "layer.setVisibility", "layer.setOpacity", "layer.setName", "layer.selectLayer", "layer.create" } },
+		{ name = "moho_mcp.tools.bone",      methods = { "bone.getProperties", "bone.setTransform", "bone.selectBone", "bone.create" } },
 		{ name = "moho_mcp.tools.animation", methods = { "animation.getKeyframes", "animation.getFrameState", "animation.setKeyframe", "animation.deleteKeyframe", "animation.setInterpolation" } },
 		{ name = "moho_mcp.tools.mesh",      methods = { "mesh.getPoints", "mesh.getShapes" } },
+		{ name = "moho_mcp.tools.shape",     methods = { "shape.draw" } },
+		{ name = "moho_mcp.tools.script",    methods = { "lua.run" } },
+		{ name = "moho_mcp.tools.svg",       methods = { "svg.import" } },
 		{ name = "moho_mcp.tools.batch",     methods = { "batch.execute" } },
 	}
 
@@ -164,13 +173,14 @@ local function installDrawMeHooks()
 		"LM_TransformLayer", "LM_SetOrigin",
 		"LM_FollowCurve", "LM_RotateLayerXY", "LM_ShearLayer",
 		"LM_TrackCamera", "LM_ZoomCamera", "LM_RollCamera", "LM_PanTiltCamera",
-		"LM_PanWorkspace", "LM_ZoomWorkspace", "LM_RotateWorkspace", "LM_OrbitWorkspace",
+		"LM_PanW", "LM_ZoomW", "LM_RotateW", "LM_OrbitW", -- workspace tools (ScriptName in lm_pan_workspace.lua etc.)
 	}
 
 	local wrapped = 0
 	for _, name in ipairs(toolNames) do
-		local tool = _G[name]
-		if tool and tool.DrawMe then
+		local tool = rawget(_G, name)
+		-- Skip names that are missing or not tool tables (other Moho versions).
+		if type(tool) == "table" and type(tool.DrawMe) == "function" then
 			local original = tool.DrawMe
 			tool.DrawMe = function(self, moho, view)
 				-- Poll for MohoMCP requests (wrapped in pcall to survive crashes)
@@ -242,7 +252,7 @@ function MohoMCP_Server:Run(moho)
 
 	if srv.isRunning() then
 		-- Stop the server
-		srv.stop()
+		srv.stop(moho)
 		MohoMCP_Server.pollActive = false
 		LM.GUI.Alert(LM.GUI.ALERT_INFO,
 			"MohoMCP Server stopped.",
@@ -251,7 +261,7 @@ function MohoMCP_Server:Run(moho)
 			nil, nil)
 	else
 		-- Start the server
-		local ok, err = srv.start()
+		local ok, err = srv.start(moho)
 		if ok then
 			MohoMCP_Server.pollActive = true
 			-- Hook into all tool DrawMe callbacks for continuous polling

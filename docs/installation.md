@@ -24,32 +24,40 @@ install-plugin.bat
 
 **macOS:**
 ```bash
-chmod +x install-plugin.sh
-./install-plugin.sh
+./install-plugin.sh                 # copy into your custom content folder
+./install-plugin.sh --link          # symlink into this checkout (development)
+./install-plugin.sh "/Applications/Moho.app"   # into the app bundle (breaks its code signature)
 ```
 
+Without a target, the macOS script installs into Moho's custom content folder, `~/Library/Application Support/Moho/Moho Pro/Scripts`. A target can be any Moho `Scripts` folder or a Moho `.app`. With `--link` the installed files are symlinks into `moho-plugin/` of this checkout, so pulling or editing the checkout updates the plugin (restart Moho to load it). The script also removes `Menu/MohoMCP/moho_mcp` and `Menu/MohoMCP/json.lua` left by older versions, and adds the poller to `Tool/_tool_list.txt` only once (it never creates that file).
+
 The scripts automatically copy all files to the correct locations and register the poller tool.
+
+On Windows the script finds Moho wherever it is installed. If it can't, or you have several Moho versions, pass the install folder: `install-plugin.bat "D:\Apps\Moho 14"`. If Moho is under `C:\Program Files`, run the script as Administrator.
 
 ### Option B: Manual installation
 
 #### Locate Your MOHO Scripts Directory
 
-| Platform | Menu scripts path | Tool scripts path |
-|----------|-------------------|-------------------|
-| Windows (default) | `C:\Program Files\Moho 14\Resources\Support\Scripts\Menu\` | `C:\Program Files\Moho 14\Resources\Support\Scripts\Tool\` |
-| macOS (default) | `/Applications/Moho 14/Moho Pro.app/Contents/Resources/Support/Scripts/Menu/` | `/Applications/Moho 14/Moho Pro.app/Contents/Resources/Support/Scripts/Tool/` |
-| Windows (user scripts) | `C:\Users\<username>\Documents\Moho\scripts\menu\` | — |
-| macOS (user scripts) | `~/Library/Application Support/Moho/scripts/menu/` | — |
+| Platform | Scripts directory |
+|----------|-------------------|
+| Windows (default) | `C:\Program Files\Moho 14\Resources\Support\Scripts\` |
+| Windows (other install location) | `<Moho folder>\Resources\Support\Scripts\` |
+| macOS (custom content folder, recommended) | `~/Library/Application Support/Moho/Moho Pro/Scripts/` |
+| macOS (app bundle; breaks its code signature) | `/Applications/Moho.app/Contents/Resources/Support/Scripts/` |
 
 #### Copy files
 
-Create a `MohoMCP/` folder inside the Menu scripts directory, then copy:
+> **Only copy the files listed here.** MOHO runs every `.lua` file under `Scripts/Menu/` as a menu script at startup. Library modules or the `tests/` folder placed there cause script errors, and `tests/run_tests.lua` can stop MOHO from starting.
 
 ```
-MohoMCP/
-├── MohoMCP_Server.lua          <- Main menu script & DrawMe hooks
-├── json.lua                    <- JSON encoder/decoder library
-└── moho_mcp/                   <- Module directory
+Scripts/
+├── Menu/MohoMCP/
+│   └── MohoMCP_Server.lua      <- Main menu script & DrawMe hooks
+├── Tool/
+│   └── MohoMCP_Poller.lua      <- Poller tool
+└── Modules/moho_mcp/           <- Copy the whole moho-plugin/moho_mcp/ folder
+    ├── json.lua                <- JSON encoder/decoder library
     ├── server.lua              <- File-based IPC server core
     ├── protocol.lua            <- JSON-RPC 2.0 protocol handling
     ├── validator.lua           <- Method allow-list & parameter validation
@@ -62,11 +70,13 @@ MohoMCP/
         └── batch.lua
 ```
 
-Also copy the poller tool to the Tool scripts directory:
+Then register the poller by adding this line (tab-separated) to `Scripts/Tool/_tool_list.txt`:
 
 ```
-MohoMCP_Poller.lua  ->  <Tool scripts path>/MohoMCP_Poller.lua
+tool	MohoMCP_Poller	...
 ```
+
+If you installed an older version, delete `Menu/MohoMCP/json.lua` and `Menu/MohoMCP/moho_mcp/`.
 
 ### Verify Installation
 
@@ -125,6 +135,14 @@ Edit your Claude Desktop configuration file:
 
 Add the MohoMCP server (same format as above — use the full path to `bridge/dist/index.js`).
 
+## Updating
+
+**Upgrade the bridge and the plugin together, then restart Moho.** Moho loads the plugin's Lua modules once and keeps them in memory, so pulling new plugin files (or re-running the install script) has no effect until Moho is restarted. The plugin writes its IPC protocol version into `status.json`; a bridge that needs a different version refuses to connect with "Moho is running an older MohoMCP plugin — restart Moho to load the new one" instead of letting every request time out.
+
+1. Update the checkout (or re-run the install script) and rebuild the bridge: `cd bridge && npm run build`
+2. Quit and restart Moho, then start **Scripts > MohoMCP Server** again
+3. Restart your MCP clients so they run the new `bridge/dist`
+
 ## Step 4: Start Everything
 
 1. **Open Moho Pro 14** and load a project
@@ -144,19 +162,30 @@ The bridge and MOHO communicate via JSON files in a platform-specific temp direc
 ```
 <temp>/moho-mcp/
 ├── status.json          <- Written by Lua when server starts
-├── req_1.json           <- Bridge writes request
-├── resp_1.json          <- Lua writes response, deletes req file
+├── req_<id>.json        <- Bridge writes request
+├── resp_<id>.json       <- Lua writes response, deletes req file
 └── ...
 ```
 
-1. Bridge writes a JSON-RPC 2.0 request as `req_<id>.json`
+1. Bridge writes a JSON-RPC 2.0 request as `req_<id>.json`. `<id>` is digits only: a per-process prefix (last 5 digits of the pid + last 4 digits of the start time in ms) followed by a 6-digit sequence, so concurrent bridge processes never share a file name
 2. MOHO Lua plugin polls for new request files during DrawMe/IsEnabled callbacks
 3. Lua processes the request, writes `resp_<id>.json`, deletes the request file
 4. Bridge reads the response, deletes the response file
 
 A background keep-alive process periodically forces MOHO viewport repaints (~4 Hz) so the Lua polling loop stays responsive even when the user isn't interacting with MOHO:
 - **Windows:** Hidden PowerShell process calling Win32 `RedrawWindow()`
-- **macOS:** AppleScript process nudging the Moho application
+- **macOS:** a JavaScript-for-Automation helper, described below.
+
+The helper uses the bridge's configured IPC directory and exits when the bridge does; disconnecting stops it and removes its script. The helper finds Moho by its bundle id (`com.lostmarble.moho`), ignores request files older than 60 s (left behind by a killed bridge), and at start checks whether it may post events and use Accessibility (`CGPreflightPostEventAccess`, `AXIsProcessTrusted`); if not, the bridge logs "grant Accessibility to <app> so MohoMCP can wake Moho". The bridge also checks that Moho is running (`lsappinfo find bundleid=com.lostmarble.moho`) before connecting, before each request and while waiting, and reports "Moho is not running" instead of timing out: `status.json` keeps saying `running: true` after a crash. If that check itself cannot run, the bridge warns once and carries on.
+
+### How waking works (macOS)
+
+Moho only runs Lua while it handles UI events, so a pending request needs Moho to wake up. The bridge starts one helper (`osascript -l JavaScript`) that, while a request file younger than 60 s is pending:
+
+1. **Mouse nudge (first, cheap):** posts a synthetic mouse-moved event straight to the Moho process (`CGEventPostToPid`). The cursor does not move. This wakes Moho only when the active tool repaints on mouse moves (Transform Layer, Transform Points, Add Point, Freehand do; Select Points, Curvature, Draw Shape, Select Shape and Eyedropper don't).
+2. **Menu read (fallback, works with every tool):** if the request is still pending ~300 ms later, it reads, through the Accessibility API, whether the *Start/Stop MohoMCP Server* menu item (in the menu that contains the *MohoMCP* submenu) is enabled, and repeats every ~400 ms while the request is pending. To answer, Moho validates that menu, which runs the plugin's poll. Measured end to end (request written to answer read): about 0.1 s when the mouse nudge is enough, about 0.5–1.1 s when the menu read is needed, with every tool tested. It only reads the `enabled` attribute; it never opens, clicks or presses a menu.
+
+Nothing comes to the front and focus does not change; Moho is found by its bundle id (`com.lostmarble.moho`) and is never launched or activated. **Both steps need Accessibility permission for the app that runs your MCP client** (Claude Desktop, your terminal, ...): System Settings > Privacy & Security > Accessibility. When it is missing the bridge logs `WARNING: grant Accessibility to <app> so MohoMCP can wake Moho ...`.
 
 ## Configuration
 
@@ -164,7 +193,8 @@ A background keep-alive process periodically forces MOHO viewport repaints (~4 H
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MOHO_MCP_IPC_DIR` | `<system-temp>/moho-mcp` | Override the IPC directory (same value must be used by both bridge and plugin) |
+| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp`; on macOS, if none is set, `getconf DARWIN_USER_TEMP_DIR` + `/moho-mcp`; else `~/.moho-mcp` | Moves **only the bridge**: the plugin does not read this variable. The plugin always uses TEMP, TMP, TMPDIR (Moho launched from Finder has TMPDIR = the `getconf DARWIN_USER_TEMP_DIR` folder), then `~/.moho-mcp`, never the shared `/tmp`. Set it only to point the bridge at the folder Moho already uses. Both sides create the folder with mode 0700. MCP clients usually start the bridge with only HOME, LOGNAME, PATH, SHELL, TERM and USER, which is why the bridge asks `getconf` on macOS |
+| `MOHO_MCP_ENABLE_LUA_RUN` | unset | `1` registers the `lua_run` tool (arbitrary Lua inside Moho) and allows `lua.run` in batches. Off by default; see [tool-reference.md](tool-reference.md#lua_run) |
 
 ### Internal Timeouts
 
@@ -175,6 +205,7 @@ Configured in `bridge/src/config.ts`:
 | `pollInterval` | 100ms | How often bridge checks for response files |
 | `requestTimeout` | 10,000ms | Max wait for a normal Lua response |
 | `renderTimeout` | 30,000ms | Max wait for screenshot/render operations |
+| `luaRunTimeout` | 30,000ms | Max wait for `lua_run` and for batches containing `lua.run` (Lua stops chunks after 20 s; a timed-out call may still apply its edit later) |
 | `batchTimeoutPerOp` | 500ms | Additional timeout per operation in a batch |
 | `maxBatchSize` | 50 | Maximum operations per `batch_execute` call |
 
@@ -194,6 +225,10 @@ Configured in `bridge/src/config.ts`:
   - **macOS:** `ls $TMPDIR/moho-mcp/status.json`
 - Verify the IPC directory is accessible
 
+### "Moho is running an older MohoMCP plugin"
+
+The bridge and the plugin in Moho's memory speak different IPC protocol versions. Restart Moho so it loads the updated plugin, start the MohoMCP Server again, and retry. If the message says the plugin is *newer*, rebuild the bridge (`npm run build`) and restart your MCP client.
+
 ### Requests time out
 
 - MOHO may not be repainting frequently enough. The keep-alive mechanism should handle this automatically, but verify that MOHO's main window is visible (not minimized)
@@ -203,7 +238,7 @@ Configured in `bridge/src/config.ts`:
 ### Screenshot returns black image
 
 - Ensure a document is open in MOHO
-- For `mode="scene"`: MOHO needs a valid frame to render
+- For `mode="scene"`: MOHO needs a valid frame to render. On macOS scene mode is disabled (rendering from the plugin crashes Moho); use `mode="full"`
 - For `mode="full"`: The MOHO window must be visible (not minimized or fully occluded)
 
 ### Input tools don't work

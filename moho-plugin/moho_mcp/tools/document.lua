@@ -126,7 +126,7 @@ function document.getInfo(moho, params)
 
     -- Duration in seconds
     if result.fps > 0 then
-        result.duration = (result.endFrame - result.startFrame) / result.fps
+        result.duration = (result.endFrame - result.startFrame + 1) / result.fps
     else
         result.duration = 0
     end
@@ -134,6 +134,21 @@ function document.getInfo(moho, params)
     -- Layer count summary
     local tlOk, tl = pcall(function() return doc:TotalLayerCount() end)
     result.totalLayers = tlOk and tl or 0
+    if not tlOk then
+        local function countLayers(container)
+            local n = 0
+            for i = 0, container:CountLayers() - 1 do
+                local layer = container:Layer(i)
+                n = n + 1
+                if layer:IsGroupType() then
+                    n = n + countLayers(moho:LayerAsGroup(layer))
+                end
+            end
+            return n
+        end
+        local countOk, total = pcall(countLayers, doc)
+        if countOk then result.totalLayers = total end
+    end
 
     local clOk, cl = pcall(function() return doc:CountLayers() end)
     result.topLevelLayers = clOk and cl or 0
@@ -233,6 +248,14 @@ end
 -- @return table|nil  {success, filePath, frame, width, height} on success
 -- @return string|nil  An error message on failure
 function document.screenshot(moho, params)
+    -- On macOS, moho:FileRender called from the poll (inside a DrawMe/IsEnabled
+    -- callback) crashes Moho with SIGSEGV in ScriptInterface_FileRender.
+    -- Windows keeps the render path: the same callback context applies there,
+    -- but no crash has been observed on Windows.
+    if package.config:sub(1, 1) == "/" then
+        return nil, 'Scene render is disabled on macOS: moho:FileRender inside the MohoMCP poll crashes Moho. '
+            .. 'Use document_screenshot with mode "full" instead.'
+    end
     if not moho or not moho.document then
         return nil, "No active document"
     end

@@ -2,7 +2,20 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { MohoClient } from "../moho-client.js";
+import { MohoClient, makeIdPrefix, SEQ_SPACE, PROTOCOL_VERSION } from "../moho-client.js";
+import { isMohoRunning } from "../moho-process.js";
+
+// File-IPC tests must not launch desktop automation on the developer's machine.
+vi.mock("../keep-alive.js", () => ({
+  startKeepAlive: vi.fn(),
+  stopKeepAlive: vi.fn(),
+}));
+
+// Tests must not depend on whether the real Moho app runs on this machine.
+vi.mock("../moho-process.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../moho-process.js")>()),
+  isMohoRunning: vi.fn(async () => true),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,11 +38,14 @@ function cleanupTestIpcDir(dir: string): void {
 }
 
 /** Write a status.json that indicates the server is running. */
-function writeStatusFile(dir: string, running = true): void {
-  fs.writeFileSync(
-    path.join(dir, "status.json"),
-    JSON.stringify({ running, pid: "moho", version: "0.1.0" }),
-  );
+function writeStatusFile(
+  dir: string,
+  running = true,
+  protocol: number | null = PROTOCOL_VERSION, // null = field absent (old plugin)
+): void {
+  const status: Record<string, unknown> = { running, pid: "moho", version: "0.1.0" };
+  if (protocol !== null) status.protocol = protocol;
+  fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(status));
 }
 
 /**
@@ -90,6 +106,7 @@ function simulateMohoServer(
 // ---------------------------------------------------------------------------
 
 vi.mock("../config.js", () => ({
+  IPC_DIR_MODE: 0o700,
   config: {
     moho: {
       get ipcDir() {
@@ -158,6 +175,22 @@ describe("MohoClient", () => {
         "MOHO MCP server is not running",
       );
       expect(client.isConnected()).toBe(false);
+    });
+
+    it("rejects an older plugin without a protocol field with a restart hint", async () => {
+      writeStatusFile(testIpcDir, true, null);
+      await expect(client.connect()).rejects.toThrow(/older MohoMCP plugin.*restart Moho/);
+      expect(client.isConnected()).toBe(false);
+    });
+
+    it("rejects a plugin with an older protocol version", async () => {
+      writeStatusFile(testIpcDir, true, PROTOCOL_VERSION - 1);
+      await expect(client.connect()).rejects.toThrow(/older MohoMCP plugin/);
+    });
+
+    it("rejects a plugin with a newer protocol version", async () => {
+      writeStatusFile(testIpcDir, true, PROTOCOL_VERSION + 1);
+      await expect(client.connect()).rejects.toThrow(/newer MohoMCP plugin/);
     });
 
     it("rejects when status.json has running=false", async () => {
@@ -393,5 +426,126 @@ describe("MohoClient", () => {
       expect(receivedIds[0]).toBeLessThan(receivedIds[1]);
       expect(receivedIds[1]).toBeLessThan(receivedIds[2]);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request IDs across bridge processes
+// ---------------------------------------------------------------------------
+
+describe("request IDs", () => {
+  it("derives distinct digits-only prefixes for concurrent processes", () => {
+    const a = makeIdPrefix(4242, 1_761_000_000_123);
+    const b = makeIdPrefix(4243, 1_761_000_000_123);
+    expect(a).not.toBe(b);
+    expect(makeIdPrefix(4242, 1_761_000_000_124)).not.toBe(a);
+    expect(makeIdPrefix(99_999, 9_999)).toBe(999_999_999);
+  });
+
+  it("produces safe integers whose decimal form is digits only", () => {
+    const client = new MohoClient({ idPrefix: makeIdPrefix(99_999, 9_999) });
+    for (let i = 0; i < 3; i++) {
+      const id = client.nextRequestId();
+      expect(Number.isSafeInteger(id)).toBe(true);
+      expect(String(id)).toMatch(/^\d+$/);
+    }
+  });
+
+  it("wraps the per-process sequence without leaving the prefix", () => {
+    const client = new MohoClient({ idPrefix: 7 });
+    let id = 0;
+    for (let i = 0; i < SEQ_SPACE; i++) id = client.nextRequestId();
+    expect(id).toBe(7 * SEQ_SPACE + 1);
+  });
+
+  it("two bridges sharing one IPC dir never collide and each gets its own response", async () => {
+    testIpcDir = createTestIpcDir();
+    writeStatusFile(testIpcDir, true);
+    const seen = new Set<string>();
+    const server = simulateMohoServer(testIpcDir, (request) => {
+      seen.add(String(request.id));
+      return { jsonrpc: "2.0", id: request.id, result: { echo: request.params } };
+    });
+    try {
+      // Same start time, different pids: the old counter gave both req_1.json.
+      const a = new MohoClient({ idPrefix: makeIdPrefix(1001, 5_000) });
+      const b = new MohoClient({ idPrefix: makeIdPrefix(1002, 5_000) });
+      await a.connect();
+      await b.connect();
+      const results = await Promise.all([
+        a.sendRequest("x", { from: "a", n: 1 }),
+        b.sendRequest("x", { from: "b", n: 1 }),
+        a.sendRequest("x", { from: "a", n: 2 }),
+        b.sendRequest("x", { from: "b", n: 2 }),
+      ]);
+      expect(results).toEqual([
+        { echo: { from: "a", n: 1 } },
+        { echo: { from: "b", n: 1 } },
+        { echo: { from: "a", n: 2 } },
+        { echo: { from: "b", n: 2 } },
+      ]);
+      expect(seen.size).toBe(4);
+      a.disconnect();
+      b.disconnect();
+    } finally {
+      server.stop();
+      cleanupTestIpcDir(testIpcDir);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Moho process checks (status.json survives a crash)
+// ---------------------------------------------------------------------------
+
+describe("Moho process checks", () => {
+  beforeEach(() => {
+    testIpcDir = createTestIpcDir();
+    writeStatusFile(testIpcDir, true);
+  });
+  afterEach(() => {
+    vi.mocked(isMohoRunning).mockResolvedValue(true);
+    cleanupTestIpcDir(testIpcDir);
+  });
+
+  it("connect fails with 'Moho is not running' despite a stale running status", async () => {
+    vi.mocked(isMohoRunning).mockResolvedValue(false);
+    const client = new MohoClient();
+    await expect(client.connect()).rejects.toThrow(/^Moho is not running/);
+    expect(client.isConnected()).toBe(false);
+  });
+
+  it("a request fails immediately, without writing a request file, once Moho is gone", async () => {
+    const client = new MohoClient();
+    await client.connect();
+    vi.mocked(isMohoRunning).mockResolvedValue(false);
+    const started = Date.now();
+    await expect(client.sendRequest("document.getInfo")).rejects.toThrow(/^Moho is not running/);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(fs.readdirSync(testIpcDir).filter((f) => f.startsWith("req_"))).toEqual([]);
+    expect(client.isConnected()).toBe(false);
+  });
+
+  it("a pending request fails fast when Moho crashes mid-request", async () => {
+    let running = true;
+    const client = new MohoClient({ isMohoRunning: async () => running });
+    await client.connect();
+    setTimeout(() => { running = false; }, 200);
+    const started = Date.now();
+    await expect(client.sendRequest("document.getInfo")).rejects.toThrow(/quit or crashed while handling document.getInfo/);
+    expect(Date.now() - started).toBeLessThan(1900); // before the 2 s request timeout
+    expect(fs.readdirSync(testIpcDir).filter((f) => f.startsWith("req_"))).toEqual([]);
+  });
+});
+
+describe("IPC directory creation", () => {
+  it("creates a missing IPC directory readable only by the user", async () => {
+    const parent = createTestIpcDir();
+    testIpcDir = path.join(parent, "nested", "ipc");
+    fs.mkdirSync(path.dirname(testIpcDir), { recursive: true });
+    const client = new MohoClient({ isMohoRunning: async () => true });
+    await expect(client.connect()).rejects.toThrow(/No status file/);
+    expect(fs.statSync(testIpcDir).mode & 0o777).toBe(0o700);
+    fs.rmSync(parent, { recursive: true, force: true });
   });
 });

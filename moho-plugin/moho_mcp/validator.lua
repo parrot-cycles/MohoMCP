@@ -31,6 +31,12 @@ local allowedMethods = {
     ["document.setFrame"]             = true,
     -- Phase 3: Visual feedback
     ["document.screenshot"]           = true,
+    -- Phase 4: Creation tools
+    ["layer.create"]                  = true,
+    ["shape.draw"]                    = true,
+    ["bone.create"]                   = true,
+    ["lua.run"]                       = true,
+    ["svg.import"]                    = true,
     -- Batch execution
     ["batch.execute"]                 = true,
 }
@@ -118,6 +124,25 @@ local paramSchemas = {
     },
     -- Phase 3: Visual feedback (no required params — frame/width/height are optional)
     ["document.screenshot"]    = {},
+    -- Phase 4: Creation tools (optional params are checked by the handlers)
+    ["layer.create"]           = {
+        { name = "type",    type = "string" },
+        { name = "name",    type = "string" },
+    },
+    ["shape.draw"]             = {
+        { name = "points",  type = "table" },
+    },
+    ["bone.create"]            = {
+        { name = "name",    type = "string" },
+        { name = "origin",  type = "table" },
+        { name = "length",  type = "number" },
+    },
+    ["lua.run"]                = {
+        { name = "code",    type = "string" },
+    },
+    ["svg.import"]             = {
+        { name = "path",    type = "string" },
+    },
     -- Batch execution
     ["batch.execute"]          = {
         { name = "operations", type = "table" },
