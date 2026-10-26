@@ -69,10 +69,31 @@ export const SCENE_RENDER_DISABLED_MAC =
 // Tool registration
 // ---------------------------------------------------------------------------
 
+/** lua_run executes arbitrary code inside Moho, so it is opt-in. */
+export const LUA_RUN_ENV = "MOHO_MCP_ENABLE_LUA_RUN";
+
+export function luaRunEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[LUA_RUN_ENV] === "1";
+}
+
+/** Heavy operations allowed per batch; mirrors moho_mcp/tools/batch.lua. */
+export const MAX_HEAVY_OPS_PER_BATCH = 5;
+const HEAVY_METHODS = new Set(["lua.run", "svg.import"]);
+
+export interface RegisterToolsOptions {
+  /** Register lua_run (and allow lua.run in batches). Default: MOHO_MCP_ENABLE_LUA_RUN=1. */
+  enableLuaRun?: boolean;
+}
+
 /**
  * Register all MOHO tools on the given MCP server instance.
  */
-export function registerTools(server: McpServer, client: MohoClient): void {
+export function registerTools(
+  server: McpServer,
+  client: MohoClient,
+  options: RegisterToolsOptions = {},
+): void {
+  const enableLuaRun = options.enableLuaRun ?? luaRunEnabled();
   // 1. document.getInfo — No input params
   server.tool(
     "document_getInfo",
@@ -921,37 +942,40 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     },
   );
 
-  // 29. lua.run — Execute Lua inside MOHO
-  server.tool(
-    "lua_run",
-    "Execute a Lua chunk inside MOHO (like Blender's execute code). In scope: moho (the ScriptInterface), " +
-      "doc/document (moho.document), json, and all MOHO/LM globals. return a value to get it back as JSON " +
-      "(tables become objects/arrays, userdata becomes a string); print() output is captured. " +
-      "Lua errors come back as tool errors. Runs as one undo step unless undo is false. Chunks are stopped after ~20 s " +
-      "(between Lua instructions; a single long Moho call cannot be interrupted); the bridge waits up to 30 s. " +
-      "If a call times out its edit may still have been applied: inspect the document before retrying. " +
-      "moho:FileNew/FileOpen/FileClose/FileRender/FileImport/FileImportImageSequence are blocked (they crash Moho from the poll).",
-    {
-      code: z.string().min(1).describe("Lua source to run"),
-      undo: z
-        .boolean()
-        .optional()
-        .describe("Wrap the run in an undo step and mark the document dirty (default true); set false for read-only queries"),
-    },
-    async ({ code, undo }) => {
-      try {
-        await ensureConnected(client);
-        const result = await client.sendRequest(
-          "lua.run",
-          { code, undo },
-          { timeout: config.moho.luaRunTimeout },
-        );
-        return successContent(result);
-      } catch (err) {
-        return errorContent(err);
-      }
-    },
-  );
+  // 29. lua.run — Execute Lua inside MOHO. Off unless MOHO_MCP_ENABLE_LUA_RUN=1:
+  // it is arbitrary code execution with the user's permissions.
+  if (enableLuaRun) {
+    server.tool(
+      "lua_run",
+      "Execute a Lua chunk inside MOHO (like Blender's execute code). In scope: moho (the ScriptInterface), " +
+        "doc/document (moho.document), json, and all MOHO/LM globals. return a value to get it back as JSON " +
+        "(tables become objects/arrays, userdata becomes a string); print() output is captured. " +
+        "Lua errors come back as tool errors. Runs as one undo step unless undo is false. Chunks are stopped after ~20 s " +
+        "(between Lua instructions; a single long Moho call cannot be interrupted); the bridge waits up to 30 s. " +
+        "If a call times out its edit may still have been applied: inspect the document before retrying. " +
+        "moho:FileNew/FileOpen/FileClose/FileRender/FileImport/FileImportImageSequence are blocked (they crash Moho from the poll).",
+      {
+        code: z.string().min(1).describe("Lua source to run"),
+        undo: z
+          .boolean()
+          .optional()
+          .describe("Wrap the run in an undo step and mark the document dirty (default true); set false for read-only queries"),
+      },
+      async ({ code, undo }) => {
+        try {
+          await ensureConnected(client);
+          const result = await client.sendRequest(
+            "lua.run",
+            { code, undo },
+            { timeout: config.moho.luaRunTimeout },
+          );
+          return successContent(result);
+        } catch (err) {
+          return errorContent(err);
+        }
+      },
+    );
+  }
 
   // 30. svg.import — Import an SVG file with Moho's bundled importer
   server.tool(
@@ -996,7 +1020,8 @@ export function registerTools(server: McpServer, client: MohoClient): void {
       "PREFER THIS over individual calls whenever you have 2+ operations.\n\n" +
       "Method names use DOT notation: \"bone.setTransform\", \"layer.getProperties\", \"animation.setKeyframe\", etc. " +
       "Params match each tool's schema exactly.\n\n" +
-      "Supports all methods EXCEPT: document.screenshot (too slow), batch.execute (no nesting).\n\n" +
+      "Supports all methods EXCEPT: document.screenshot (too slow), batch.execute (no nesting); lua.run only when lua_run is enabled. " +
+      "At most 5 lua.run/svg.import per batch; the whole batch gets 25 s in Moho, later operations are skipped once it is used up.\n\n" +
       "Common patterns:\n" +
       "- Multi-frame animation: batch bone.setTransform across frames 1,5,10,15,...\n" +
       "- Bulk reads: batch document.getInfo + document.getLayers + layer.getProperties for several layers\n" +
@@ -1025,12 +1050,21 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     },
     async ({ operations, stopOnError }) => {
       try {
+        if (!enableLuaRun && operations.some((op) => op.method === "lua.run")) {
+          throw new Error(
+            `lua.run is disabled. Set ${LUA_RUN_ENV}=1 in the MCP server's environment to allow it.`,
+          );
+        }
+        const heavy = operations.filter((op) => HEAVY_METHODS.has(op.method)).length;
+        if (heavy > MAX_HEAVY_OPS_PER_BATCH) {
+          throw new Error(
+            `At most ${MAX_HEAVY_OPS_PER_BATCH} lua.run/svg.import operations per batch (got ${heavy}).`,
+          );
+        }
         await ensureConnected(client);
-        // lua.run may legitimately run up to its 20 s Lua limit; SVG imports can be slow.
-        const base = operations.some((op) => op.method === "lua.run" || op.method === "svg.import")
-          ? config.moho.luaRunTimeout
-          : config.moho.requestTimeout;
-        const timeout = base + operations.length * config.moho.batchTimeoutPerOp;
+        // The plugin stops a batch after batchBudgetMs; wait longer than that.
+        const timeout =
+          config.moho.batchBudgetMs + 5000 + operations.length * config.moho.batchTimeoutPerOp;
         const result = await client.sendRequest(
           "batch.execute",
           { operations, stopOnError },

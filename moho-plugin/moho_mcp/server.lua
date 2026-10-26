@@ -49,10 +49,24 @@ end
 
 --- Get the IPC directory path.
 -- Uses TEMP/moho-mcp/ on Windows, /tmp/moho-mcp/ on others.
-local function getIpcDir()
-    local tmp = os.getenv("TEMP") or os.getenv("TMP") or os.getenv("TMPDIR") or "/tmp"
-    return tmp .. SEP .. "moho-mcp" .. SEP
+-- Per-user only: never the shared /tmp. Same order as the bridge
+-- (bridge/src/config.ts defaultIpcDir): TEMP, TMP, TMPDIR, then $HOME/.moho-mcp.
+local function nonEmpty(v)
+    if v ~= nil and v ~= "" then return v end
+    return nil
 end
+local function getIpcDir()
+    local tmp = nonEmpty(os.getenv("TEMP")) or nonEmpty(os.getenv("TMP")) or nonEmpty(os.getenv("TMPDIR"))
+    if tmp then
+        return tmp .. SEP .. "moho-mcp" .. SEP
+    end
+    local home = nonEmpty(os.getenv("HOME")) or nonEmpty(os.getenv("USERPROFILE"))
+    if home then
+        return home .. SEP .. ".moho-mcp" .. SEP
+    end
+    return nil
+end
+server._getIpcDir = getIpcDir
 
 --- Check if a file exists by trying to open it.
 local function fileExists(path)
@@ -100,7 +114,8 @@ local function mkdirp(path)
     if SEP == "\\" then
         cmd = 'cmd /c mkdir "' .. path .. '" 2>NUL'
     else
-        cmd = 'mkdir -p "' .. path .. '" 2>/dev/null'
+        -- 0700: only this user may read or plant requests.
+        cmd = 'mkdir -p -m 700 "' .. path .. '" 2>/dev/null'
     end
     local handle = io.popen(cmd)
     if handle then handle:close() end
@@ -183,6 +198,9 @@ function server.start(moho)
     end
 
     ipcDir = getIpcDir()
+    if not ipcDir then
+        return false, "No per-user directory for IPC: TEMP, TMP, TMPDIR and HOME are all unset"
+    end
     mkdirp(ipcDir)
 
     -- Verify directory is accessible

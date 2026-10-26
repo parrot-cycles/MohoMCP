@@ -89,6 +89,29 @@ describe("Lua IPC polling", () => {
     assert(files[dir .. "req_9.json.tmp"] == "partial", "half-written request touched")
   `));
 
+  it("falls back to a per-user 0700 folder instead of the shared /tmp", () => runLua(serverSetup + `
+    local env = {HOME = "/Users/u"}
+    os.getenv = function(name) return env[name] end
+    local cmds = {}
+    io.popen = function(cmd) cmds[#cmds + 1] = cmd; return {close = function() end} end
+    assert(server._getIpcDir() == "/Users/u/.moho-mcp/")
+    env.TMPDIR = ""
+    assert(server._getIpcDir() == "/Users/u/.moho-mcp/", "empty TMPDIR must be ignored")
+    env.TMPDIR = "/var/T"; env.TMP = "/tmp2"; env.TEMP = "/temp1"
+    assert(server._getIpcDir() == "/temp1/moho-mcp/", "TEMP first, like the bridge")
+    env = {HOME = "/Users/u"}
+    server.stop()
+    assert(server.start())
+    assert(server.getInfo().ipcDir == "/Users/u/.moho-mcp/")
+    local made = false
+    for _, c in ipairs(cmds) do if c:find('mkdir -p -m 700 "/Users/u/.moho-mcp/"', 1, true) then made = true end end
+    assert(made, "IPC dir not created with mode 700: " .. table.concat(cmds, " | "))
+    env = {}
+    server.stop()
+    local ok, err = server.start()
+    assert(not ok and err:find("HOME"), tostring(err))
+  `));
+
   it("advertises the IPC protocol version the bridge checks in status.json", () => runLua(serverSetup + `
     local status = json.decode(files[dir .. "status.json"])
     assert(status.running == true and status.protocol == 2, files[dir .. "status.json"])
@@ -757,7 +780,8 @@ server.registerHandler("shape.draw", shapeTools.draw)
 server.registerHandler("bone.create", boneTools.create)
 server.registerHandler("lua.run", scriptTools.run)
 server.registerHandler("svg.import", svgTools.import)
-server.registerHandler("batch.execute", assert(load(batchSource))().execute)
+batchTools = assert(load(batchSource))()
+server.registerHandler("batch.execute", batchTools.execute)
 assert(server.start())
 local dir = server.getInfo().ipcDir
 function call(id, method, params)
@@ -780,6 +804,34 @@ end
     assert(call(3, "bone.create", {name="b", origin={0,0}}).error.code == -32602)
     assert(call(4, "lua.run", {code=5}).error.code == -32602)
     assert(call(5, "svg.import", {}).error.code == -32602)
+  `));
+
+  it("refuses batches with more than 5 lua.run/svg.import operations", () => runLua(setup + `
+    local ops = {}
+    for i = 1, 6 do ops[i] = {method = (i % 2 == 0) and "lua.run" or "svg.import", params = {code = "return 1", path = "/x.svg"}} end
+    local resp = call(1, "batch.execute", {operations = ops})
+    assert(resp.error and resp.error.message:find("At most 5"), json.encode(resp))
+  `));
+
+  it("stops a batch at its time budget and hands lua.run only the remaining time", () => runLua(setup + `
+    batchTools.TIME_BUDGET = 0.05
+    local resp = call(1, "batch.execute", {operations = {
+      {method = "lua.run", params = {code = "while true do end", undo = false}},
+      {method = "lua.run", params = {code = "return 1", undo = false}},
+      {method = "layer.create", params = {type = "vector", name = "Late"}},
+    }})
+    local r = resp.result
+    assert(r.results[1].success == false and r.results[1].error.message:find("time limit %(0%.0"), json.encode(r.results[1]))
+    assert(r.results[2].error.message:find("time budget"), json.encode(r.results[2]))
+    assert(r.results[3].error.message:find("time budget"), json.encode(r.results[3]))
+    assert(r.summary.timeBudgetExhausted == true and r.summary.stoppedEarly == true)
+    assert(indexOf("CreateNewLayer") == nil, "an operation ran after the budget")
+  `));
+
+  it("a caller-supplied _timeLimit can only shorten lua.run's limit", () => runLua(fakeMoho + `
+    scriptTools.timeLimit = 0.05
+    local r, err = scriptTools.run(moho, {code = "while true do end", undo = false, _timeLimit = 1000})
+    assert(r == nil and err:find("time limit %(0%.05"), tostring(err))
   `));
 
   it("refreshes the UI once per poll, under the re-entry guard", () => runLua(setup + `

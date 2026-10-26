@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { config } from "./config.js";
+import { config, IPC_DIR_MODE } from "./config.js";
 import { parseResponse } from "./protocol.js";
 import { startKeepAlive, stopKeepAlive } from "./keep-alive.js";
 import { isMohoRunning, MOHO_NOT_RUNNING } from "./moho-process.js";
@@ -116,7 +116,7 @@ export class MohoClient {
 
     // Ensure the IPC directory exists
     try {
-      await fs.promises.mkdir(ipcDir, { recursive: true });
+      await fs.promises.mkdir(ipcDir, { recursive: true, mode: IPC_DIR_MODE });
     } catch {
       // directory may already exist
     }

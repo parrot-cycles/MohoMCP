@@ -36,7 +36,7 @@ An MCP (Model Context Protocol) server for **Moho Pro 14** — enabling AI assis
 | **Interact** | Send mouse clicks, drags, and keyboard shortcuts to the MOHO window |
 | **Know** | Built-in reference data for all Moho 14 tools and keyboard shortcuts |
 
-## Available Tools (31)
+## Available Tools (31; `lua_run` is opt-in)
 
 ### Read-Only Tools
 
@@ -85,7 +85,7 @@ An MCP (Model Context Protocol) server for **Moho Pro 14** — enabling AI assis
 | `layer_create` | Create a vector, group or bone layer (optionally inside a parent) |
 | `shape_draw` | Draw a closed (fillable) or open shape from points, with fill/stroke color and width |
 | `bone_create` | Add a named bone (origin, length, angle, optional parent) to a bone layer |
-| `lua_run` | Run a Lua chunk inside Moho with `moho`/`doc` in scope; returns its value as JSON plus `print()` output |
+| `lua_run` | Run a Lua chunk inside Moho with `moho`/`doc` in scope; returns its value as JSON plus `print()` output. **Off unless `MOHO_MCP_ENABLE_LUA_RUN=1`** |
 | `svg_import` | Import an SVG file with Moho's bundled importer (no dialogs); returns the added layers |
 
 ### Batch Execution
@@ -167,7 +167,8 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MOHO_MCP_IPC_DIR` | `<system-temp>/moho-mcp` | Directory for file-based IPC communication |
+| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp`, else `~/.moho-mcp` | Directory for file-based IPC communication (created 0700; never the shared `/tmp`) |
+| `MOHO_MCP_ENABLE_LUA_RUN` | unset | Set to `1` to register `lua_run` and allow `lua.run` in batches |
 
 Internal timing (in `bridge/src/config.ts`):
 
@@ -202,7 +203,7 @@ MOHO only processes Lua callbacks during UI repaints. A background process perio
 - **Allow-list validation**: Only explicitly registered methods can be called
 - **Parameter validation**: All parameters type-checked before execution
 - **pcall wrapping**: All Lua handlers wrapped in protected calls — a crash in one method won't crash the server
-- **`lua_run` is arbitrary code execution**: it runs any Lua (including `io`/`os`) inside MOHO with your user's permissions. Only connect MCP clients you trust.
+- **`lua_run` is arbitrary code execution and is off by default**: it runs any Lua (including `io`/`os`) inside MOHO with your user's permissions. Enable it with `MOHO_MCP_ENABLE_LUA_RUN=1` only for MCP clients you trust (see [docs/tool-reference.md](docs/tool-reference.md#lua_run)).
 
 ## Development
 
@@ -224,7 +225,7 @@ MohoMCP/
 │       ├── config.ts          # IPC directory, timeouts
 │       ├── moho-client.ts     # File-based IPC client
 │       ├── protocol.ts        # JSON-RPC 2.0 types
-│       ├── tools.ts           # 31 MCP tool registrations
+│       ├── tools.ts           # MCP tool registrations (31 with lua_run)
 │       ├── resources.ts       # Static knowledge resources
 │       ├── keep-alive.ts      # Cross-platform viewport refresh
 │       ├── platform-capture.ts # Platform dispatch → window capture
@@ -265,7 +266,7 @@ MohoMCP/
 
 ## Platform Support
 
-All 31 tools work on both platforms, except scene-mode screenshots, which are disabled on macOS (see below). The bridge auto-detects the OS at runtime and loads the appropriate native backend — no configuration needed.
+All tools work on both platforms, except scene-mode screenshots, which are disabled on macOS (see below). The bridge auto-detects the OS at runtime and loads the appropriate native backend — no configuration needed.
 
 | Feature | Windows | macOS |
 |---------|---------|-------|

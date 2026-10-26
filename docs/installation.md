@@ -183,7 +183,7 @@ The helper uses the bridge's configured IPC directory and exits when the bridge 
 Moho only runs Lua while it handles UI events, so a pending request needs Moho to wake up. The bridge starts one helper (`osascript -l JavaScript`) that, while a request file younger than 60 s is pending:
 
 1. **Mouse nudge (first, cheap):** posts a synthetic mouse-moved event straight to the Moho process (`CGEventPostToPid`). The cursor does not move. This wakes Moho only when the active tool repaints on mouse moves (Transform Layer, Transform Points, Add Point, Freehand do; Select Points, Curvature, Draw Shape, Select Shape and Eyedropper don't).
-2. **Menu read (fallback, works with every tool):** if the request is still pending ~300 ms later, it reads, through the Accessibility API, whether the *Start/Stop MohoMCP Server* menu item (in the menu that contains the *MohoMCP* submenu) is enabled, and repeats every ~400 ms while the request is pending. To answer, Moho validates that menu, which runs the plugin's poll. Live: ~150 ms with every tool tested. It only reads the `enabled` attribute; it never opens, clicks or presses a menu.
+2. **Menu read (fallback, works with every tool):** if the request is still pending ~300 ms later, it reads, through the Accessibility API, whether the *Start/Stop MohoMCP Server* menu item (in the menu that contains the *MohoMCP* submenu) is enabled, and repeats every ~400 ms while the request is pending. To answer, Moho validates that menu, which runs the plugin's poll. Measured end to end (request written to answer read): about 0.1 s when the mouse nudge is enough, about 0.5–1.1 s when the menu read is needed, with every tool tested. It only reads the `enabled` attribute; it never opens, clicks or presses a menu.
 
 Nothing comes to the front and focus does not change; Moho is found by its bundle id (`com.lostmarble.moho`) and is never launched or activated. **Both steps need Accessibility permission for the app that runs your MCP client** (Claude Desktop, your terminal, ...): System Settings > Privacy & Security > Accessibility. When it is missing the bridge logs `WARNING: grant Accessibility to <app> so MohoMCP can wake Moho ...`.
 
@@ -193,7 +193,8 @@ Nothing comes to the front and focus does not change; Moho is found by its bundl
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MOHO_MCP_IPC_DIR` | `<system-temp>/moho-mcp` | Override the IPC directory (same value must be used by both bridge and plugin) |
+| `MOHO_MCP_IPC_DIR` | `$TEMP`/`$TMP`/`$TMPDIR` + `/moho-mcp`, else `~/.moho-mcp` | Override the IPC directory. The plugin uses the same rule (TEMP, TMP, TMPDIR, then `~/.moho-mcp`, never the shared `/tmp`); both create it with mode 0700 |
+| `MOHO_MCP_ENABLE_LUA_RUN` | unset | `1` registers the `lua_run` tool (arbitrary Lua inside Moho) and allows `lua.run` in batches. Off by default; see [tool-reference.md](tool-reference.md#lua_run) |
 
 ### Internal Timeouts
 

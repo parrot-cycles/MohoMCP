@@ -106,6 +106,7 @@ function simulateMohoServer(
 // ---------------------------------------------------------------------------
 
 vi.mock("../config.js", () => ({
+  IPC_DIR_MODE: 0o700,
   config: {
     moho: {
       get ipcDir() {
@@ -534,5 +535,17 @@ describe("Moho process checks", () => {
     await expect(client.sendRequest("document.getInfo")).rejects.toThrow(/quit or crashed while handling document.getInfo/);
     expect(Date.now() - started).toBeLessThan(1900); // before the 2 s request timeout
     expect(fs.readdirSync(testIpcDir).filter((f) => f.startsWith("req_"))).toEqual([]);
+  });
+});
+
+describe("IPC directory creation", () => {
+  it("creates a missing IPC directory readable only by the user", async () => {
+    const parent = createTestIpcDir();
+    testIpcDir = path.join(parent, "nested", "ipc");
+    fs.mkdirSync(path.dirname(testIpcDir), { recursive: true });
+    const client = new MohoClient({ isMohoRunning: async () => true });
+    await expect(client.connect()).rejects.toThrow(/No status file/);
+    expect(fs.statSync(testIpcDir).mode & 0o777).toBe(0o700);
+    fs.rmSync(parent, { recursive: true, force: true });
   });
 });

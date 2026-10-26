@@ -1,6 +1,6 @@
 # MohoMCP Tool Reference
 
-Complete reference for all 31 MCP tools and 2 knowledge resources.
+Complete reference for all 31 MCP tools (30 unless `lua_run` is enabled) and 2 knowledge resources.
 
 ---
 
@@ -603,6 +603,21 @@ Add a bone to a bone layer's rest pose (frame 0).
 
 ### `lua_run`
 
+**`lua_run` is off by default.** It runs arbitrary Lua inside Moho (including `io` and `os`, so file and shell access) with your user's permissions, so a prompt-injected or misbehaving client could do anything a Moho script can. The bridge registers it, and lets `batch_execute` run `lua.run`, only when it is started with `MOHO_MCP_ENABLE_LUA_RUN=1`:
+
+```bash
+# Claude Code
+claude mcp add --scope user moho-mcp -e MOHO_MCP_ENABLE_LUA_RUN=1 -- node /path/to/MohoMCP/bridge/dist/index.js
+```
+
+```toml
+# Codex (~/.codex/config.toml)
+[mcp_servers.moho-mcp.env]
+MOHO_MCP_ENABLE_LUA_RUN = "1"
+```
+
+For Claude Desktop add `"env": { "MOHO_MCP_ENABLE_LUA_RUN": "1" }` to the server entry. Restart the client afterwards.
+
 Execute a Lua chunk inside MOHO, the equivalent of Blender MCP's `execute_blender_code`. In scope: `moho` (the ScriptInterface of the current callback), `doc` / `document` (`moho.document`), `json`, and all MOHO globals (`MOHO`, `LM`, ...). Globals assigned by the chunk stay in a per-call environment.
 
 **Parameters:**
@@ -618,6 +633,8 @@ Execute a Lua chunk inside MOHO, the equivalent of Blender MCP's `execute_blende
 `result` is the chunk's return value (several values become an array; none becomes `null`). Tables become arrays (keys 1..n) or objects; userdata, functions and threads become `tostring()` strings. `print()` output is captured (up to 64 KB). A Lua error is returned as JSON-RPC error `-32603` whose message holds the Lua error and any output printed before it; the server keeps running. A chunk is stopped after about 20 s of wall-clock time (checked between Lua instructions, so one long call into Moho, such as a render, cannot be interrupted). Captured output is capped at 64 KB and the serialized result at about 1 MB; either cut adds a `…[truncated]` marker and `"truncated": true` to the response.
 
 The bridge waits up to 30 s for `lua_run` (and for a `batch_execute` that contains `lua.run`), which includes waiting for Moho to repaint and pick the request up. **A `lua_run` that timed out on the bridge side may still have run and applied its edit afterwards** — inspect the document (or undo) before retrying, or the edit can be applied twice.
+
+**Gaps in the time limit.** The limit is a debug hook on the main Lua thread, checked every 100,000 instructions. It does not apply inside coroutines the chunk creates (hooks are per thread), it cannot interrupt one long call into Moho, and a chunk that wraps its loop in `pcall` and keeps going swallows the limit error each time it fires. Such a chunk can still freeze Moho.
 
 **Example:**
 ```lua
@@ -676,7 +693,9 @@ Each operation in the array:
 | `params` | object | No | Parameters for the method (matches the individual tool's schema) |
 
 **Restrictions:**
-- Maximum 50 operations per batch
+- Maximum 50 operations per batch, and at most 5 of them `lua.run`/`svg.import`
+- A batch has a 25 s time budget in Moho: it is checked between operations, later operations are skipped once it is used up (`summary.timeBudgetExhausted`), and a `lua.run` inside a batch only gets the time that is left. The bridge waits 30 s plus 0.5 s per operation
+- `lua.run` is refused unless `lua_run` is enabled (`MOHO_MCP_ENABLE_LUA_RUN=1`)
 - `document.screenshot` is not allowed (too heavyweight)
 - `batch.execute` cannot be nested
 

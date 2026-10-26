@@ -16,23 +16,10 @@ local MAX_RESULT = 1024 * 1024 -- approximate cap on the serialized result, byte
 local MAX_DEPTH = 16
 local TRUNCATED = "…[truncated]"
 
---- Elapsed-time source. os.clock() is process CPU time, so time spent outside
---- this Lua state is not counted. LM.Stopwatch is Moho's own wall-clock timer
---- (Scripts/Tool/lm_add_bone.lua:185-186 starts one, :272 compares
---- ElapsedTime() with a 0.3 s click delay). Without it, fall back to os.time():
---- wall clock with 1 s resolution, plenty for a 20 s limit.
+--- Elapsed-time source (see edit.clock): LM.Stopwatch, else os.time().
 -- @return function  returns seconds elapsed since this call
 function script.clock()
-    local ok, sw = pcall(function()
-        local w = LM.Stopwatch:new_local()
-        w:Start()
-        return w
-    end)
-    if ok and sw then
-        return function() return sw:ElapsedTime() end
-    end
-    local t0 = os.time()
-    return function() return os.difftime(os.time(), t0) end
+    return require("moho_mcp.edit").clock()
 end
 
 local jsonNull = function()
@@ -277,6 +264,9 @@ function script.run(moho, params)
     if debug and debug.sethook and debug.gethook then
         local elapsed = script.clock()
         local limit = script.timeLimit
+        -- batch.execute passes what is left of its budget; it can only shorten.
+        local given = tonumber(params._timeLimit)
+        if given ~= nil and given < limit then limit = math.max(given, 0) end
         local gotHook
         gotHook, oldHook, oldMask, oldCount = pcall(debug.gethook)
         if not gotHook then oldHook = nil end

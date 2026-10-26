@@ -101,6 +101,25 @@ function edit.typeName(lt)
     return "unknown"
 end
 
+--- Elapsed-time source. os.clock() is process CPU time, so time spent outside
+--- this Lua state is not counted. LM.Stopwatch is Moho's own wall-clock timer
+--- (Scripts/Tool/lm_add_bone.lua:185-186 starts one, :272 compares
+--- ElapsedTime() with a 0.3 s click delay). Without it, fall back to os.time():
+--- wall clock with 1 s resolution, plenty for a 20 s limit.
+-- @return function  returns seconds elapsed since this call
+function edit.clock()
+    local ok, sw = pcall(function()
+        local w = LM.Stopwatch:new_local()
+        w:Start()
+        return w
+    end)
+    if ok and sw then
+        return function() return sw:ElapsedTime() end
+    end
+    local t0 = os.time()
+    return function() return os.difftime(os.time(), t0) end
+end
+
 --- Read a 2D point given as [x, y] or {x=, y=}.
 function edit.point(p, label)
     if type(p) ~= "table" then

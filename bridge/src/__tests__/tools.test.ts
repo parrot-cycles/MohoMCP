@@ -3,7 +3,7 @@ import { z } from "zod";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { registerTools } from "../tools.js";
+import { registerTools, luaRunEnabled, MAX_HEAVY_OPS_PER_BATCH } from "../tools.js";
 import { MohoClient } from "../moho-client.js";
 
 // ---------------------------------------------------------------------------
@@ -66,13 +66,40 @@ describe("registerTools", () => {
     ).not.toThrow();
   });
 
-  it("registers exactly 31 tools", () => {
-    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
+  it("registers 30 tools and no lua_run by default", () => {
+    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: false });
+    expect(mockServer.tools).toHaveLength(30);
+    expect(mockServer.tools.map((t) => t.name)).not.toContain("lua_run");
+  });
+
+  it("registers lua_run (31 tools) only when enabled", () => {
+    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: true });
     expect(mockServer.tools).toHaveLength(31);
+    expect(mockServer.tools.map((t) => t.name)).toContain("lua_run");
+  });
+
+  it("reads the opt-in flag from MOHO_MCP_ENABLE_LUA_RUN=1 only", () => {
+    expect(luaRunEnabled({})).toBe(false);
+    expect(luaRunEnabled({ MOHO_MCP_ENABLE_LUA_RUN: "0" })).toBe(false);
+    expect(luaRunEnabled({ MOHO_MCP_ENABLE_LUA_RUN: "true" })).toBe(false);
+    expect(luaRunEnabled({ MOHO_MCP_ENABLE_LUA_RUN: "1" })).toBe(true);
+    const saved = process.env.MOHO_MCP_ENABLE_LUA_RUN;
+    try {
+      delete process.env.MOHO_MCP_ENABLE_LUA_RUN;
+      registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
+      expect(mockServer.tools.map((t) => t.name)).not.toContain("lua_run");
+      process.env.MOHO_MCP_ENABLE_LUA_RUN = "1";
+      const other = createMockMcpServer();
+      registerTools(other as unknown as Parameters<typeof registerTools>[0], client);
+      expect(other.tools.map((t) => t.name)).toContain("lua_run");
+    } finally {
+      if (saved === undefined) delete process.env.MOHO_MCP_ENABLE_LUA_RUN;
+      else process.env.MOHO_MCP_ENABLE_LUA_RUN = saved;
+    }
   });
 
   it("registers all expected tool names", () => {
-    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
+    registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: true });
 
     const names = mockServer.tools.map((t) => t.name);
 
@@ -130,6 +157,7 @@ describe("registerTools", () => {
       registerTools(
         mockServer as unknown as Parameters<typeof registerTools>[0],
         client,
+        { enableLuaRun: true },
       );
     });
 
@@ -254,20 +282,44 @@ describe("registerTools", () => {
       );
     });
 
-    it("batch_execute uses the lua timeout only when the batch contains lua.run", async () => {
+    it("batch_execute waits longer than the plugin's 25 s batch budget", async () => {
       const batch = findTool("batch_execute");
       await batch.handler({ operations: [{ method: "layer.create" }, { method: "lua.run" }], stopOnError: false });
       expect(client.sendRequest).toHaveBeenLastCalledWith(
         "batch.execute",
         expect.anything(),
-        { timeout: 30000 + 2 * 500 },
+        { timeout: 25000 + 5000 + 2 * 500 },
       );
       await batch.handler({ operations: [{ method: "layer.create" }], stopOnError: false });
       expect(client.sendRequest).toHaveBeenLastCalledWith(
         "batch.execute",
         expect.anything(),
-        { timeout: 10000 + 500 },
+        { timeout: 25000 + 5000 + 500 },
       );
+    });
+
+    it("batch_execute refuses more than 5 lua.run/svg.import operations", async () => {
+      const ops = Array.from({ length: MAX_HEAVY_OPS_PER_BATCH + 1 }, (_, i) => ({
+        method: i % 2 ? "lua.run" : "svg.import",
+      }));
+      const r = (await findTool("batch_execute").handler({ operations: ops, stopOnError: false })) as {
+        isError?: boolean; content: Array<{ text: string }>;
+      };
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain("At most 5");
+      expect(client.sendRequest).not.toHaveBeenCalled();
+    });
+
+    it("batch_execute refuses lua.run when lua_run is disabled", async () => {
+      const off = createMockMcpServer();
+      registerTools(off as unknown as Parameters<typeof registerTools>[0], client, { enableLuaRun: false });
+      const batch = off.tools.find((t) => t.name === "batch_execute")!;
+      const r = (await batch.handler({ operations: [{ method: "lua.run", params: { code: "return 1" } }], stopOnError: false })) as {
+        isError?: boolean; content: Array<{ text: string }>;
+      };
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain("MOHO_MCP_ENABLE_LUA_RUN=1");
+      expect(client.sendRequest).not.toHaveBeenCalled();
     });
 
     it("lua_run requires non-empty code", () => {

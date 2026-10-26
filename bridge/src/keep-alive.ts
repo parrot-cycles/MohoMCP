@@ -97,7 +97,8 @@ while ($true) {
 // 2. If the request is still pending AX_AFTER ms later, read (never press)
 //    the AXEnabled attribute of our own menu item through the Accessibility
 //    API. Moho validates the menu to answer, which calls
-//    MohoMCP_Server:IsEnabled -> server.poll. Live: ~150 ms with every tool.
+//    MohoMCP_Server:IsEnabled -> server.poll. Measured end to end: ~0.1 s via
+//    the mouse path, ~0.5-1.1 s via the menu read, with every tool.
 //    The menu-bar item is found by content (the menu that holds an item
 //    titled MENU_FOLDER), not by its localized title; the element is cached
 //    and looked up again when it stops answering.
@@ -327,7 +328,7 @@ export function startKeepAlive(): void {
   // Write the script to the IPC temp directory
   const dir = config.moho.ipcDir;
   try {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch {
     // already exists
   }
