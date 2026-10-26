@@ -17,6 +17,7 @@ import path from "node:path";
 import { config } from "./config.js";
 import { parseResponse } from "./protocol.js";
 import { startKeepAlive, stopKeepAlive } from "./keep-alive.js";
+import { isMohoRunning, MOHO_NOT_RUNNING } from "./moho-process.js";
 
 // ---------------------------------------------------------------------------
 // Request IDs
@@ -45,7 +46,12 @@ export function makeIdPrefix(pid: number = process.pid, startMs: number = Date.n
 export interface MohoClientOptions {
   /** Override the per-process ID prefix (tests). */
   idPrefix?: number;
+  /** Override the "is the Moho app running" check (tests). */
+  isMohoRunning?: () => Promise<boolean>;
 }
+
+/** How often to re-check that Moho is still running while awaiting a response. */
+const PROCESS_CHECK_INTERVAL = 1000;
 
 /**
  * Refuse to talk to a plugin that speaks another protocol: an older plugin
@@ -73,11 +79,13 @@ export function checkProtocol(protocol: unknown): void {
 
 export class MohoClient {
   private readonly idPrefix: number;
+  private readonly mohoRunning: () => Promise<boolean>;
   private seq = 0;
   private connected = false;
 
   constructor(options: MohoClientOptions = {}) {
     this.idPrefix = options.idPrefix ?? makeIdPrefix();
+    this.mohoRunning = options.isMohoRunning ?? (() => isMohoRunning());
   }
 
   /** Next digits-only request ID, unique across concurrent bridge processes. */
@@ -100,6 +108,11 @@ export class MohoClient {
     }
 
     const { ipcDir } = config.moho;
+
+    // status.json survives a Moho crash, so check the process first.
+    if (!(await this.mohoRunning())) {
+      throw new Error(MOHO_NOT_RUNNING);
+    }
 
     // Ensure the IPC directory exists
     try {
@@ -167,6 +180,11 @@ export class MohoClient {
       );
     }
 
+    if (!(await this.mohoRunning())) {
+      this.disconnect();
+      throw new Error(MOHO_NOT_RUNNING);
+    }
+
     const id = this.nextRequestId();
     const { ipcDir, pollInterval, requestTimeout } = config.moho;
     const timeout = options?.timeout ?? requestTimeout;
@@ -191,6 +209,7 @@ export class MohoClient {
 
     // Poll for response file
     const startTime = Date.now();
+    let lastProcessCheck = startTime;
 
     while (true) {
       // Check if response file exists
@@ -224,6 +243,18 @@ export class MohoClient {
               `Request ${method} (id=${id}) timed out after ${timeout}ms. ` +
               "Is the MOHO MCP server running and polling?",
             );
+          }
+
+          // Fail fast if Moho quit or crashed while we wait.
+          if (Date.now() - lastProcessCheck >= PROCESS_CHECK_INTERVAL) {
+            lastProcessCheck = Date.now();
+            if (!(await this.mohoRunning())) {
+              await fs.promises.unlink(reqPath).catch(() => {});
+              this.disconnect();
+              throw new Error(
+                `Moho quit or crashed while handling ${method} (id=${id}). ${MOHO_NOT_RUNNING}`,
+              );
+            }
           }
 
           // Wait before next poll

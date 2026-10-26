@@ -3,11 +3,18 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { MohoClient, makeIdPrefix, SEQ_SPACE, PROTOCOL_VERSION } from "../moho-client.js";
+import { isMohoRunning } from "../moho-process.js";
 
 // File-IPC tests must not launch desktop automation on the developer's machine.
 vi.mock("../keep-alive.js", () => ({
   startKeepAlive: vi.fn(),
   stopKeepAlive: vi.fn(),
+}));
+
+// Tests must not depend on whether the real Moho app runs on this machine.
+vi.mock("../moho-process.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../moho-process.js")>()),
+  isMohoRunning: vi.fn(async () => true),
 }));
 
 // ---------------------------------------------------------------------------
@@ -483,5 +490,49 @@ describe("request IDs", () => {
       server.stop();
       cleanupTestIpcDir(testIpcDir);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Moho process checks (status.json survives a crash)
+// ---------------------------------------------------------------------------
+
+describe("Moho process checks", () => {
+  beforeEach(() => {
+    testIpcDir = createTestIpcDir();
+    writeStatusFile(testIpcDir, true);
+  });
+  afterEach(() => {
+    vi.mocked(isMohoRunning).mockResolvedValue(true);
+    cleanupTestIpcDir(testIpcDir);
+  });
+
+  it("connect fails with 'Moho is not running' despite a stale running status", async () => {
+    vi.mocked(isMohoRunning).mockResolvedValue(false);
+    const client = new MohoClient();
+    await expect(client.connect()).rejects.toThrow(/^Moho is not running/);
+    expect(client.isConnected()).toBe(false);
+  });
+
+  it("a request fails immediately, without writing a request file, once Moho is gone", async () => {
+    const client = new MohoClient();
+    await client.connect();
+    vi.mocked(isMohoRunning).mockResolvedValue(false);
+    const started = Date.now();
+    await expect(client.sendRequest("document.getInfo")).rejects.toThrow(/^Moho is not running/);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(fs.readdirSync(testIpcDir).filter((f) => f.startsWith("req_"))).toEqual([]);
+    expect(client.isConnected()).toBe(false);
+  });
+
+  it("a pending request fails fast when Moho crashes mid-request", async () => {
+    let running = true;
+    const client = new MohoClient({ isMohoRunning: async () => running });
+    await client.connect();
+    setTimeout(() => { running = false; }, 200);
+    const started = Date.now();
+    await expect(client.sendRequest("document.getInfo")).rejects.toThrow(/quit or crashed while handling document.getInfo/);
+    expect(Date.now() - started).toBeLessThan(1900); // before the 2 s request timeout
+    expect(fs.readdirSync(testIpcDir).filter((f) => f.startsWith("req_"))).toEqual([]);
   });
 });
