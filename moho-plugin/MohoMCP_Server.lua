@@ -242,7 +242,7 @@ function MohoMCP_Server:Run(moho)
 
 	if srv.isRunning() then
 		-- Stop the server
-		srv.stop()
+		srv.stop(moho)
 		MohoMCP_Server.pollActive = false
 		LM.GUI.Alert(LM.GUI.ALERT_INFO,
 			"MohoMCP Server stopped.",
@@ -251,7 +251,7 @@ function MohoMCP_Server:Run(moho)
 			nil, nil)
 	else
 		-- Start the server
-		local ok, err = srv.start()
+		local ok, err = srv.start(moho)
 		if ok then
 			MohoMCP_Server.pollActive = true
 			-- Hook into all tool DrawMe callbacks for continuous polling

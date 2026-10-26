@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { MohoClient } from "../moho-client.js";
+import { MohoClient, makeIdPrefix, SEQ_SPACE } from "../moho-client.js";
 
 // File-IPC tests must not launch desktop automation on the developer's machine.
 vi.mock("../keep-alive.js", () => ({
@@ -399,5 +399,70 @@ describe("MohoClient", () => {
       expect(receivedIds[0]).toBeLessThan(receivedIds[1]);
       expect(receivedIds[1]).toBeLessThan(receivedIds[2]);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request IDs across bridge processes
+// ---------------------------------------------------------------------------
+
+describe("request IDs", () => {
+  it("derives distinct digits-only prefixes for concurrent processes", () => {
+    const a = makeIdPrefix(4242, 1_761_000_000_123);
+    const b = makeIdPrefix(4243, 1_761_000_000_123);
+    expect(a).not.toBe(b);
+    expect(makeIdPrefix(4242, 1_761_000_000_124)).not.toBe(a);
+    expect(makeIdPrefix(99_999, 9_999)).toBe(999_999_999);
+  });
+
+  it("produces safe integers whose decimal form is digits only", () => {
+    const client = new MohoClient({ idPrefix: makeIdPrefix(99_999, 9_999) });
+    for (let i = 0; i < 3; i++) {
+      const id = client.nextRequestId();
+      expect(Number.isSafeInteger(id)).toBe(true);
+      expect(String(id)).toMatch(/^\d+$/);
+    }
+  });
+
+  it("wraps the per-process sequence without leaving the prefix", () => {
+    const client = new MohoClient({ idPrefix: 7 });
+    let id = 0;
+    for (let i = 0; i < SEQ_SPACE; i++) id = client.nextRequestId();
+    expect(id).toBe(7 * SEQ_SPACE + 1);
+  });
+
+  it("two bridges sharing one IPC dir never collide and each gets its own response", async () => {
+    testIpcDir = createTestIpcDir();
+    writeStatusFile(testIpcDir, true);
+    const seen = new Set<string>();
+    const server = simulateMohoServer(testIpcDir, (request) => {
+      seen.add(String(request.id));
+      return { jsonrpc: "2.0", id: request.id, result: { echo: request.params } };
+    });
+    try {
+      // Same start time, different pids: the old counter gave both req_1.json.
+      const a = new MohoClient({ idPrefix: makeIdPrefix(1001, 5_000) });
+      const b = new MohoClient({ idPrefix: makeIdPrefix(1002, 5_000) });
+      await a.connect();
+      await b.connect();
+      const results = await Promise.all([
+        a.sendRequest("x", { from: "a", n: 1 }),
+        b.sendRequest("x", { from: "b", n: 1 }),
+        a.sendRequest("x", { from: "a", n: 2 }),
+        b.sendRequest("x", { from: "b", n: 2 }),
+      ]);
+      expect(results).toEqual([
+        { echo: { from: "a", n: 1 } },
+        { echo: { from: "b", n: 1 } },
+        { echo: { from: "a", n: 2 } },
+        { echo: { from: "b", n: 2 } },
+      ]);
+      expect(seen.size).toBe(4);
+      a.disconnect();
+      b.disconnect();
+    } finally {
+      server.stop();
+      cleanupTestIpcDir(testIpcDir);
+    }
   });
 });

@@ -54,6 +54,44 @@ end
 `;
 
 describe("Lua IPC polling", () => {
+  it("finds large per-process request IDs through Moho's file listing", () => runLua(serverSetup + `
+    local listing = {}
+    local moho = {
+      BeginFileListing = function(_, d)
+        listing = {}
+        for p in pairs(files) do
+          if p:sub(1, #d) == d then listing[#listing + 1] = p:sub(#d + 1) end
+        end
+        table.sort(listing)
+      end,
+      GetNextFile = function() return table.remove(listing, 1) end,
+    }
+    server.registerHandler("document.getInfo", function() return {ok=true} end)
+    -- Two bridge processes (prefixes 42420001 and 42430001) plus noise files.
+    local ids = {"424200010000001", "424300010000001", "424200010000002"}
+    for _, id in ipairs(ids) do
+      files[dir .. "req_" .. id .. ".json"] =
+        '{"jsonrpc":"2.0","id":' .. id .. ',"method":"document.getInfo"}'
+    end
+    files[dir .. "req_9.json.tmp"] = "partial"
+    files[dir .. "status.json"] = "{}"
+    server.poll(moho)   -- at most 2 per poll
+    server.poll(moho)
+    for _, id in ipairs(ids) do
+      assert(files[dir .. "req_" .. id .. ".json"] == nil, "request " .. id .. " not consumed")
+      local resp = assert(files[dir .. "resp_" .. id .. ".json"], "no response for " .. id)
+      assert(resp:find('"id":' .. id, 1, true), "response id mangled: " .. resp)
+    end
+    assert(files[dir .. "req_9.json.tmp"] == "partial", "half-written request touched")
+  `));
+
+  it("falls back to probing small IDs when Moho has no file listing", () => runLua(serverSetup + `
+    server.registerHandler("document.getInfo", function() return {ok=true} end)
+    request(3)
+    server.poll({})
+    assert(files[dir .. "resp_3.json"] ~= nil)
+  `));
+
   it("dispatches an in-flight request once when a handler triggers a nested repaint", () => runLua(serverSetup + `
     local calls = 0
     server.registerHandler("document.getInfo", function(moho)

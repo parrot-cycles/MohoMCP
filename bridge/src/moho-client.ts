@@ -6,6 +6,10 @@
  * - MOHO reads the request, processes it, writes: <ipcDir>/resp_<id>.json
  * - MOHO deletes the request file after processing
  * - Bridge reads the response file, then deletes it
+ *
+ * Request IDs are digits-only safe integers of the form
+ * <per-process prefix><6-digit sequence>, so several bridge processes sharing
+ * one IPC directory never write the same req_<id>.json / resp_<id>.json.
  */
 
 import fs from "node:fs";
@@ -15,12 +19,45 @@ import { parseResponse } from "./protocol.js";
 import { startKeepAlive, stopKeepAlive } from "./keep-alive.js";
 
 // ---------------------------------------------------------------------------
+// Request IDs
+// ---------------------------------------------------------------------------
+
+/** Sequence numbers per process run from 1 to SEQ_SPACE - 1, then wrap. */
+export const SEQ_SPACE = 1_000_000;
+
+/**
+ * Per-process ID prefix: last 5 digits of the pid followed by the last
+ * 4 digits of the start time in ms. Concurrent processes never share a pid,
+ * and the time part guards against a recycled pid meeting stale files.
+ * Max prefix 999_999_999, so prefix * SEQ_SPACE + seq stays below 2^53.
+ */
+export function makeIdPrefix(pid: number = process.pid, startMs: number = Date.now()): number {
+  return (Math.abs(Math.trunc(pid)) % 100_000) * 10_000 + (Math.abs(Math.trunc(startMs)) % 10_000);
+}
+
+export interface MohoClientOptions {
+  /** Override the per-process ID prefix (tests). */
+  idPrefix?: number;
+}
+
+// ---------------------------------------------------------------------------
 // MohoClient
 // ---------------------------------------------------------------------------
 
 export class MohoClient {
-  private nextId = 1;
+  private readonly idPrefix: number;
+  private seq = 0;
   private connected = false;
+
+  constructor(options: MohoClientOptions = {}) {
+    this.idPrefix = options.idPrefix ?? makeIdPrefix();
+  }
+
+  /** Next digits-only request ID, unique across concurrent bridge processes. */
+  nextRequestId(): number {
+    this.seq = (this.seq % (SEQ_SPACE - 1)) + 1;
+    return this.idPrefix * SEQ_SPACE + this.seq;
+  }
 
   // -----------------------------------------------------------------------
   // Connection lifecycle
@@ -102,7 +139,7 @@ export class MohoClient {
       );
     }
 
-    const id = this.nextId++;
+    const id = this.nextRequestId();
     const { ipcDir, pollInterval, requestTimeout } = config.moho;
     const timeout = options?.timeout ?? requestTimeout;
 
