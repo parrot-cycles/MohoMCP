@@ -8,9 +8,11 @@
 --   Scripts/Menu/Layer Effects/rt_break_apart_shapes.lua:333-334
 --     (moho:SetSelLayer(layer) then moho:Mesh() targets that layer)
 
-local edit = require("moho_mcp.edit")
-
 local shape = {}
+
+-- Required lazily: if Moho ever executes this file on its own (for example from
+-- an old Menu/ install), a top-level require of a sibling module would fail.
+local edit
 
 local function isVectorLayer(lyr)
     local M = edit.M()
@@ -26,6 +28,7 @@ end
 --     strokeWidth?: number (pixels), smooth?|curved?: boolean }
 -- @return table { layerId, layerName, shapeId, pointIds, closed, hasFill, hasOutline }
 function shape.draw(moho, params)
+    edit = edit or require("moho_mcp.edit")
     local pts = params.points
     if type(pts) ~= "table" or #pts < 2 then
         return nil, "points must be an array of at least 2 [x, y] pairs"

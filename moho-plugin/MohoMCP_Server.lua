@@ -75,6 +75,10 @@ local function loadModules(baseDir)
 
 	-- Modules live in Scripts/Modules, not next to this script: Moho runs every
 	-- .lua file under Scripts/Menu as a menu script at startup.
+	-- Also search this script's own folder: when Menu/MohoMCP/MohoMCP_Server.lua
+	-- is a symlink into a checkout (install-plugin.sh --link) and Moho reports
+	-- the resolved path, moho_mcp/ sits right next to it in moho-plugin/.
+	setupPackagePath(baseDir)
 	setupPackagePath(baseDir .. "../../Modules/")
 
 	-- Load the JSON library and make it globally available

@@ -24,13 +24,16 @@ install-plugin.bat
 
 **macOS:**
 ```bash
-chmod +x install-plugin.sh
-./install-plugin.sh
+./install-plugin.sh                 # copy into your custom content folder
+./install-plugin.sh --link          # symlink into this checkout (development)
+./install-plugin.sh "/Applications/Moho.app"   # into the app bundle (breaks its code signature)
 ```
+
+Without a target, the macOS script installs into Moho's custom content folder, `~/Library/Application Support/Moho/Moho Pro/Scripts`. A target can be any Moho `Scripts` folder or a Moho `.app`. With `--link` the installed files are symlinks into `moho-plugin/` of this checkout, so pulling or editing the checkout updates the plugin (restart Moho to load it). The script also removes `Menu/MohoMCP/moho_mcp` and `Menu/MohoMCP/json.lua` left by older versions, and adds the poller to `Tool/_tool_list.txt` only once (it never creates that file).
 
 The scripts automatically copy all files to the correct locations and register the poller tool.
 
-On Windows the script finds Moho wherever it is installed. If it can't, or you have several Moho versions, pass the install folder: `install-plugin.bat "D:\Apps\Moho 14"`. On macOS, pass the app if it isn't at the default location: `./install-plugin.sh "/path/to/Moho Pro.app"`. If Moho is under `C:\Program Files`, run the script as Administrator.
+On Windows the script finds Moho wherever it is installed. If it can't, or you have several Moho versions, pass the install folder: `install-plugin.bat "D:\Apps\Moho 14"`. If Moho is under `C:\Program Files`, run the script as Administrator.
 
 ### Option B: Manual installation
 
@@ -40,7 +43,8 @@ On Windows the script finds Moho wherever it is installed. If it can't, or you h
 |----------|-------------------|
 | Windows (default) | `C:\Program Files\Moho 14\Resources\Support\Scripts\` |
 | Windows (other install location) | `<Moho folder>\Resources\Support\Scripts\` |
-| macOS (default) | `/Applications/Moho 14/Moho Pro.app/Contents/Resources/Support/Scripts/` |
+| macOS (custom content folder, recommended) | `~/Library/Application Support/Moho/Moho Pro/Scripts/` |
+| macOS (app bundle; breaks its code signature) | `/Applications/Moho.app/Contents/Resources/Support/Scripts/` |
 
 #### Copy files
 

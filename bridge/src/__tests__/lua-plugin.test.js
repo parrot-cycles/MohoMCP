@@ -12,7 +12,7 @@ function runLua(body) {
   const L = lauxlib.luaL_newstate();
   lualib.luaL_openlibs(L);
   for (const [name, relative] of Object.entries({
-    jsonSource: "json.lua", protocolSource: "moho_mcp/protocol.lua",
+    jsonSource: "moho_mcp/json.lua", protocolSource: "moho_mcp/protocol.lua",
     validatorSource: "moho_mcp/validator.lua", serverSource: "moho_mcp/server.lua",
     documentSource: "moho_mcp/tools/document.lua", animationSource: "moho_mcp/tools/animation.lua",
     editSource: "moho_mcp/edit.lua", layerSource: "moho_mcp/tools/layer.lua",

@@ -110,7 +110,7 @@ Use the provided install scripts:
 
 **Windows:** Run `install-plugin.bat`. It finds Moho wherever it's installed. If it can't, run `install-plugin.bat "D:\path\to\Moho 14"`.
 
-**macOS:** Run `chmod +x install-plugin.sh && ./install-plugin.sh`. If Moho isn't in `/Applications/Moho 14/`, use `./install-plugin.sh "/path/to/Moho Pro.app"`.
+**macOS:** Run `./install-plugin.sh`. By default it installs into your Moho custom content folder, `~/Library/Application Support/Moho/Moho Pro/Scripts` (pass another Scripts folder, or a Moho `.app`, as an argument; writing into the app bundle breaks its code signature). Add `--link` to symlink the files into this checkout instead of copying them, for development: `./install-plugin.sh --link`.
 
 Don't copy `moho-plugin/` into MOHO's `Scripts/Menu/` folder as a whole. MOHO runs every `.lua` file there at startup. For a manual install, see [docs/installation.md](docs/installation.md#option-b-manual-installation).
 
