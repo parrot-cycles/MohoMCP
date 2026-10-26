@@ -953,11 +953,43 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     },
   );
 
+  // 30. svg.import — Import an SVG file with Moho's bundled importer
+  server.tool(
+    "svg_import",
+    "Import an SVG file into the current document with Moho's bundled SVG importer (no dialogs). " +
+      "Use this to bring in complex vector art drawn elsewhere. path must be an absolute path to an existing .svg file. " +
+      "One undo step. Returns { path, added: [{ layerId, name, type, parentId }], count }.",
+    {
+      path: z
+        .string()
+        .min(1)
+        .refine((p) => path.isAbsolute(p), "path must be absolute")
+        .refine((p) => p.endsWith(".svg"), "path must end in .svg (lowercase)")
+        .describe("Absolute path to the .svg file"),
+    },
+    async ({ path: svgPath }) => {
+      try {
+        if (!fs.existsSync(svgPath)) {
+          throw new Error(`SVG file not found: ${svgPath}`);
+        }
+        await ensureConnected(client);
+        const result = await client.sendRequest(
+          "svg.import",
+          { path: svgPath },
+          { timeout: config.moho.luaRunTimeout },
+        );
+        return successContent(result);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
+
   // =========================================================================
   // Batch Execution
   // =========================================================================
 
-  // 30. batch.execute — Execute multiple operations in a single IPC round-trip
+  // 31. batch.execute — Execute multiple operations in a single IPC round-trip
   server.tool(
     "batch_execute",
     "Execute multiple MOHO operations in a single IPC round-trip (~300ms total) instead of one round-trip per call (~300ms each). " +
@@ -971,7 +1003,7 @@ export function registerTools(server: McpServer, client: MohoClient): void {
       "- Keyframe + easing: batch animation.setKeyframe then animation.setInterpolation for each\n" +
       "- Multi-bone pose: batch bone.setTransform for each bone in a skeleton at the same frame\n" +
       "- Layer setup: batch layer.setName + layer.setVisibility + layer.setOpacity\n" +
-      "- Drawing: batch layer.create + several shape.draw (or bone.create) calls\n\n" +
+      "- Drawing: batch layer.create + several shape.draw (or bone.create) calls, or svg.import for complex art\n\n" +
       "Returns { results: [{ success, index, result|error }], summary: { total, executed, succeeded, failed, stoppedEarly } }. " +
       "Use stopOnError: true when later operations depend on earlier ones succeeding.",
     {
@@ -994,8 +1026,8 @@ export function registerTools(server: McpServer, client: MohoClient): void {
     async ({ operations, stopOnError }) => {
       try {
         await ensureConnected(client);
-        // A lua.run inside the batch may legitimately run up to its 20 s Lua limit.
-        const base = operations.some((op) => op.method === "lua.run")
+        // lua.run may legitimately run up to its 20 s Lua limit; SVG imports can be slow.
+        const base = operations.some((op) => op.method === "lua.run" || op.method === "svg.import")
           ? config.moho.luaRunTimeout
           : config.moho.requestTimeout;
         const timeout = base + operations.length * config.moho.batchTimeoutPerOp;

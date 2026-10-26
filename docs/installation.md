@@ -174,11 +174,9 @@ The bridge and MOHO communicate via JSON files in a platform-specific temp direc
 
 A background keep-alive process periodically forces MOHO viewport repaints (~4 Hz) so the Lua polling loop stays responsive even when the user isn't interacting with MOHO:
 - **Windows:** Hidden PowerShell process calling Win32 `RedrawWindow()`
-- **macOS:** AppleScript process nudging the Moho application
+- **macOS:** a JavaScript-for-Automation helper (`osascript -l JavaScript`) that, while a request file is pending, posts a synthetic mouse-moved event to the running Moho process (`CGEventPostToPid`). The cursor does not move, focus does not change, and it works with Moho in the background or frontmost. It never launches or activates Moho and does nothing when Moho is not running. If your MCP client app has not been allowed to control the computer, macOS may ask for Accessibility permission the first time.
 
-The macOS helper runs an explicit loop under `osascript` and only activates
-Moho while request files are pending. It uses the bridge's configured IPC
-directory; disconnecting stops the helper and removes its script.
+The helper uses the bridge's configured IPC directory and exits when the bridge does; disconnecting stops it and removes its script. The bridge also checks that a process named `Moho` is running (`pgrep -x Moho`) before connecting, before each request and while waiting, and reports "Moho is not running" instead of timing out: `status.json` keeps saying `running: true` after a crash.
 
 ## Configuration
 
@@ -230,7 +228,7 @@ The bridge and the plugin in Moho's memory speak different IPC protocol versions
 ### Screenshot returns black image
 
 - Ensure a document is open in MOHO
-- For `mode="scene"`: MOHO needs a valid frame to render
+- For `mode="scene"`: MOHO needs a valid frame to render. On macOS scene mode is disabled (rendering from the plugin crashes Moho); use `mode="full"`
 - For `mode="full"`: The MOHO window must be visible (not minimized or fully occluded)
 
 ### Input tools don't work

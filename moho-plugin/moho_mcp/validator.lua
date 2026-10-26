@@ -36,6 +36,7 @@ local allowedMethods = {
     ["shape.draw"]                    = true,
     ["bone.create"]                   = true,
     ["lua.run"]                       = true,
+    ["svg.import"]                    = true,
     -- Batch execution
     ["batch.execute"]                 = true,
 }
@@ -138,6 +139,9 @@ local paramSchemas = {
     },
     ["lua.run"]                = {
         { name = "code",    type = "string" },
+    },
+    ["svg.import"]             = {
+        { name = "path",    type = "string" },
     },
     -- Batch execution
     ["batch.execute"]          = {

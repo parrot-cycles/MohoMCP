@@ -299,6 +299,24 @@
           "output": { "type": "string", "description": "Captured print() output" }
         }
       }
+    },
+    "svg.import": {
+      "description": "Import an SVG file with Moho's bundled SVG importer, without dialogs",
+      "params": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string", "description": "Absolute path to an existing .svg file (lowercase extension)" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "added": { "type": "array", "items": { "type": "object", "properties": { "layerId": { "type": "number" }, "name": { "type": "string" }, "type": { "type": "string" }, "parentId": { "type": "number" } } } },
+          "count": { "type": "number" }
+        }
+      }
     }
   }
 }

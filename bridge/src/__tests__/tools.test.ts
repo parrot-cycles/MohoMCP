@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
 import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
 import { registerTools } from "../tools.js";
 import { MohoClient } from "../moho-client.js";
 
@@ -64,9 +66,9 @@ describe("registerTools", () => {
     ).not.toThrow();
   });
 
-  it("registers exactly 30 tools", () => {
+  it("registers exactly 31 tools", () => {
     registerTools(mockServer as unknown as Parameters<typeof registerTools>[0], client);
-    expect(mockServer.tools).toHaveLength(30);
+    expect(mockServer.tools).toHaveLength(31);
   });
 
   it("registers all expected tool names", () => {
@@ -110,6 +112,7 @@ describe("registerTools", () => {
     expect(names).toContain("shape_draw");
     expect(names).toContain("bone_create");
     expect(names).toContain("lua_run");
+    expect(names).toContain("svg_import");
   });
 
   it("each tool has a non-empty description", () => {
@@ -344,6 +347,27 @@ describe("registerTools", () => {
         expect(client.sendRequest).not.toHaveBeenCalled();
       } finally {
         spy.mockRestore();
+      }
+    });
+
+    it("svg_import validates the path and forwards existing files to svg.import", async () => {
+      expect(parse("svg_import", { path: "/tmp/a.svg" }).success).toBe(true);
+      expect(parse("svg_import", { path: "a.svg" }).success).toBe(false);
+      expect(parse("svg_import", { path: "/tmp/a.SVG" }).success).toBe(false);
+      expect(parse("svg_import", {}).success).toBe(false);
+
+      const missing = (await findTool("svg_import").handler({ path: "/nonexistent/x.svg" })) as { isError?: boolean };
+      expect(missing.isError).toBe(true);
+      expect(client.sendRequest).not.toHaveBeenCalled();
+
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "moho-svg-test-"));
+      const file = path.join(dir, "logo.svg");
+      fs.writeFileSync(file, "<svg xmlns='http://www.w3.org/2000/svg'/>");
+      try {
+        await findTool("svg_import").handler({ path: file });
+        expect(client.sendRequest).toHaveBeenCalledWith("svg.import", { path: file }, { timeout: 30000 });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
       }
     });
   });

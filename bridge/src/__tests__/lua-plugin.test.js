@@ -18,6 +18,7 @@ function runLua(body) {
     editSource: "moho_mcp/edit.lua", layerSource: "moho_mcp/tools/layer.lua",
     boneSource: "moho_mcp/tools/bone.lua", shapeSource: "moho_mcp/tools/shape.lua",
     scriptSource: "moho_mcp/tools/script.lua", batchSource: "moho_mcp/tools/batch.lua",
+    svgSource: "moho_mcp/tools/svg.lua",
   })) {
     lua.lua_pushstring(L, to_luastring(fs.readFileSync(path.join(plugin, relative), "utf8")));
     lua.lua_setglobal(L, to_luastring(name));
@@ -284,6 +285,7 @@ local function newLayer(name, lt)
   function l:CountLayers() return #self.children end
   function l:Layer(i) return self.children[i + 1] end
   function l:Parent() return self.parent end
+  function l:UUID() return "uuid-" .. self.id end
   return l
 end
 
@@ -363,6 +365,7 @@ layerTools = assert(load(layerSource))()
 boneTools = assert(load(boneSource))()
 shapeTools = assert(load(shapeSource))()
 scriptTools = assert(load(scriptSource))()
+svgTools = assert(load(svgSource))()
 function indexOf(s) for i, c in ipairs(calls) do if c == s then return i end end return nil end
 `;
 
@@ -471,6 +474,67 @@ describe("Lua bone.create", () => {
     r, err = boneTools.create(moho, {layer=rig.id, name="b", origin={0,0}, length=1, parent=5})
     assert(r == nil and err:find("out of range"))
     assert(#calls == 0)
+  `));
+});
+
+describe("Lua svg.import", () => {
+  const svgSetup = fakeMoho + `
+local realOpen = io.open
+io.open = function(p, mode)
+  if p == "/tmp/art/logo.svg" then return {close=function() end} end
+  return nil, "not found"
+end
+LM.GUI = {OpenFile = function() error("a real file dialog was opened") end}
+local origOpenFile = LM.GUI.OpenFile
+SS_SVGImport = {hideDialog = false, browseFirst = true}
+function SS_SVGImport:Run(m)
+  assert(self.hideDialog == true, "importer dialog not suppressed")
+  local file = LM.GUI.OpenFile("Get me some SVGs ...")
+  assert(file == "/tmp/art/logo.svg", tostring(file))
+  m.document:PrepUndo(nil); m.document:SetDirty()
+  local g = m:CreateNewLayer(MOHO.LT_GROUP, false); g:SetName("logo.svg")
+  local v = m:CreateNewLayer(MOHO.LT_VECTOR, false); v:SetName("path1")
+  m:PlaceLayerInGroup(v, g, true, false)
+end
+function restored()
+  return LM.GUI.OpenFile == origOpenFile and SS_SVGImport.hideDialog == false and SS_SVGImport.browseFirst == true
+end
+`;
+
+  it("imports through SS_SVGImport without dialogs and returns the added layers", () => runLua(svgSetup + `
+    local r = assert(svgTools.import(moho, {path="/tmp/art/logo.svg"}))
+    assert(r.count == 2 and r.path == "/tmp/art/logo.svg")
+    local g, v = r.added[1], r.added[2]
+    assert(g.name == "logo.svg" and g.type == "group" and g.parentId == -1, json.encode(r))
+    assert(v.name == "path1" and v.type == "vector" and v.parentId == g.layerId, json.encode(r))
+    assert(restored(), "OpenFile/hideDialog/browseFirst not restored")
+    assert(indexOf("PrepUndo nil") and edit.uiDirty)
+  `));
+
+  it("restores the importer state when the import fails", () => runLua(svgSetup + `
+    function SS_SVGImport:Run() LM.GUI.OpenFile(); error("bad svg") end
+    local r, err = svgTools.import(moho, {path="/tmp/art/logo.svg"})
+    assert(r == nil and err:find("bad svg"), tostring(err))
+    assert(restored())
+  `));
+
+  it("validates the path and requires the importer", () => runLua(svgSetup + `
+    local function fails(p, pat)
+      local r, err = svgTools.import(moho, {path=p})
+      assert(r == nil and err:find(pat, 1, true), tostring(err))
+    end
+    fails("art/logo.svg", "absolute")
+    fails("/tmp/art/logo.SVG", ".svg (lowercase)")
+    fails("/tmp/art/missing.svg", "not found")
+    SS_SVGImport = nil
+    fails("/tmp/art/logo.svg", "SS_SVGImport")
+    assert(#calls == 0, "document touched: " .. table.concat(calls, ","))
+  `));
+
+  it("reports an import that added nothing", () => runLua(svgSetup + `
+    function SS_SVGImport:Run() end
+    local r, err = svgTools.import(moho, {path="/tmp/art/logo.svg"})
+    assert(r == nil and err:find("added no layers"), tostring(err))
   `));
 });
 
@@ -641,6 +705,7 @@ server.registerHandler("layer.create", layerTools.create)
 server.registerHandler("shape.draw", shapeTools.draw)
 server.registerHandler("bone.create", boneTools.create)
 server.registerHandler("lua.run", scriptTools.run)
+server.registerHandler("svg.import", svgTools.import)
 server.registerHandler("batch.execute", assert(load(batchSource))().execute)
 assert(server.start())
 local dir = server.getInfo().ipcDir
@@ -663,6 +728,7 @@ end
     assert(call(2, "layer.create", {type="vector"}).error.code == -32602)
     assert(call(3, "bone.create", {name="b", origin={0,0}}).error.code == -32602)
     assert(call(4, "lua.run", {code=5}).error.code == -32602)
+    assert(call(5, "svg.import", {}).error.code == -32602)
   `));
 
   it("refreshes the UI once per poll, under the re-entry guard", () => runLua(setup + `

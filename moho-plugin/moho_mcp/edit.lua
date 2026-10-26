@@ -68,6 +68,37 @@ function edit.findLayer(moho, ref)
     return nil, "layer must be a layer ID (number) or name (string)"
 end
 
+--- Visit every layer depth-first: fn(layer, parentLayerOrNil).
+function edit.eachLayer(moho, fn)
+    local function walk(container, parent)
+        for i = 0, container:CountLayers() - 1 do
+            local child = container:Layer(i)
+            if child then
+                fn(child, parent)
+                local isGroup = false
+                pcall(function() isGroup = child:IsGroupType() end)
+                if isGroup then
+                    local gOk, group = pcall(function() return moho:LayerAsGroup(child) end)
+                    if gOk and group then walk(group, child) end
+                end
+            end
+        end
+    end
+    walk(moho.document, nil)
+end
+
+--- Human-readable layer type name.
+function edit.typeName(lt)
+    local M = edit.M()
+    if M then
+        for _, n in ipairs({ "VECTOR", "BONE", "GROUP", "IMAGE", "SWITCH", "PARTICLE", "NOTE", "AUDIO", "PATCH", "TEXT", "3D" }) do
+            local v = M["LT_" .. n]
+            if v ~= nil and v == lt then return n:lower() end
+        end
+    end
+    return "unknown"
+end
+
 --- Read a 2D point given as [x, y] or {x=, y=}.
 function edit.point(p, label)
     if type(p) ~= "table" then

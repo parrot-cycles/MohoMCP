@@ -120,6 +120,7 @@ local function loadModules(baseDir)
 		{ name = "moho_mcp.tools.mesh",      methods = { "mesh.getPoints", "mesh.getShapes" } },
 		{ name = "moho_mcp.tools.shape",     methods = { "shape.draw" } },
 		{ name = "moho_mcp.tools.script",    methods = { "lua.run" } },
+		{ name = "moho_mcp.tools.svg",       methods = { "svg.import" } },
 		{ name = "moho_mcp.tools.batch",     methods = { "batch.execute" } },
 	}
 

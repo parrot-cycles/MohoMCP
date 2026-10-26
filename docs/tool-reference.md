@@ -1,6 +1,6 @@
 # MohoMCP Tool Reference
 
-Complete reference for all 30 MCP tools and 2 knowledge resources.
+Complete reference for all 31 MCP tools and 2 knowledge resources.
 
 ---
 
@@ -96,7 +96,7 @@ Render the MOHO scene or capture the full application window as a PNG image.
 ```
 
 **Notes:**
-- `mode="scene"` uses MOHO's `FileRender` API for a clean render without UI elements
+- `mode="scene"` uses MOHO's `FileRender` API for a clean render without UI elements. **Disabled on macOS:** `FileRender` called from inside the MohoMCP poll crashes Moho, so the tool returns an error pointing to `mode="full"`
 - `mode="full"` uses Win32 `PrintWindow` to capture the entire application window including timeline, layers panel, toolbar, etc.
 - Full mode is useful for identifying UI element positions before using `input_mouseClick`
 
@@ -630,6 +630,30 @@ return { layers = n, current = moho.layer:Name() }
 **Blocked inside a chunk:** `moho:FileNew`, `FileOpen`, `FileClose`, `FileRender`, `FileImport` and `FileImportImageSequence` raise a Lua error for the duration of the chunk: called from inside the MohoMCP poll they crash Moho (seen live for `FileNew` and `FileRender`). They are blocked on Moho's class, so the real `moho` object can still be passed to other scripts (for example `SS_SVGImport:Run(moho)`). `FileSave` / `FileSaveAs` are allowed but untested inside the poll.
 
 > `lua_run` can do anything a Moho script can, including file and shell access through `io`/`os`.
+
+---
+
+### `svg_import`
+
+Import an SVG file into the current document with Moho's bundled SVG importer (`SS_SVGImport`, `Tool/ss_svg_import14.lua`), without its file and options dialogs. Good for complex vector art drawn elsewhere.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | string | Yes | Absolute path to an existing file ending in `.svg` (lowercase) |
+
+**Returns:**
+```json
+{
+  "path": "/Users/me/art/logo.svg",
+  "added": [
+    { "layerId": 0, "name": "logo.svg", "type": "group", "parentId": -1 },
+    { "layerId": 1, "name": "path1", "type": "vector", "parentId": 0 }
+  ],
+  "count": 2
+}
+```
+`added` lists every layer that exists after the import but not before (compared by layer UUID, since absolute IDs shift when layers are inserted). The importer creates its own undo step. An import that adds nothing is reported as an error. The importer's `OpenFile` hook and `hideDialog`/`browseFirst` settings are restored afterwards, also on failure.
 
 ---
 
