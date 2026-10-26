@@ -653,7 +653,7 @@ Import an SVG file into the current document with Moho's bundled SVG importer (`
   "count": 2
 }
 ```
-`added` lists every layer that exists after the import but not before (compared by layer UUID, since absolute IDs shift when layers are inserted). The importer creates its own undo step. An import that adds nothing is reported as an error. The importer's `OpenFile` hook and `hideDialog`/`browseFirst` settings are restored afterwards, also on failure.
+`added` lists every layer that exists after the import but not before, compared by layer UUID since absolute IDs shift when layers are inserted. If `UUID()` is unavailable, layers are matched by their name path and type instead; then an imported layer with exactly the same path and type as an existing one may be reported in place of the existing one (the count stays right). Import options (scale, minify, etc.) are whatever was last saved in the importer's own dialog (its `SS_SVGImport` preferences); only the file and options dialogs are skipped. The importer creates its own undo step. An import that adds nothing is reported as an error. The importer's `OpenFile` hook and `hideDialog`/`browseFirst` settings are restored afterwards, also on failure.
 
 ---
 

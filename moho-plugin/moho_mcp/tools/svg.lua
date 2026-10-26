@@ -5,6 +5,9 @@
 -- is set (ss_svg_import14.lua:530-531) and skips its options dialog when
 -- hideDialog is true (:549). The importer opens its own undo step and marks
 -- the document dirty (PrepUndo(nil) + SetDirty, :3030-3031).
+-- Import options (scaling, layer minifying, etc.) are whatever the user last
+-- saved in the importer's own dialog (its SS_SVGImport.* prefs); only the file
+-- dialog and the options dialog are bypassed.
 
 local svg = {}
 
@@ -12,11 +15,25 @@ local function isAbsolute(path)
     return path:sub(1, 1) == "/" or path:match("^%a:[\\/]") ~= nil
 end
 
---- Identity of a layer that survives layer insertion (absolute IDs shift).
-local function layerKey(lyr)
-    local ok, uuid = pcall(function() return lyr:UUID() end)
-    if ok and uuid ~= nil then return "uuid:" .. tostring(uuid) end
-    return lyr
+--- Layer identities that survive layer insertion (absolute IDs shift).
+--- Preferred: layer:UUID() (used by ss_svg_import14.lua:1401). Without it,
+--- a "path|type" signature, counted as a multiset, so existing layers are
+--- matched one-to-one and only the extra ones count as added.
+local function snapshot(edit, moho)
+    local uuids, sigs, haveUuid = {}, {}, true
+    edit.eachLayer(moho, function(lyr, _, path)
+        local ok, uuid = pcall(function() return lyr:UUID() end)
+        if ok and uuid ~= nil and uuid ~= "" then
+            uuids[tostring(uuid)] = true
+        else
+            haveUuid = false
+        end
+        local lt = nil
+        pcall(function() lt = lyr:LayerType() end)
+        local sig = path .. "|" .. tostring(lt)
+        sigs[sig] = (sigs[sig] or 0) + 1
+    end)
+    return { uuids = uuids, sigs = sigs, haveUuid = haveUuid }
 end
 
 --- Import an SVG file.
@@ -51,8 +68,7 @@ function svg.import(moho, params)
         return nil, "LM.GUI is unavailable"
     end
 
-    local before = {}
-    edit.eachLayer(moho, function(lyr) before[layerKey(lyr)] = true end)
+    local before = snapshot(edit, moho)
 
     local origOpen = gui.OpenFile
     local origHide, origBrowse = importer.hideDialog, importer.browseFirst
@@ -73,10 +89,25 @@ function svg.import(moho, params)
     end
 
     local added = {}
-    edit.eachLayer(moho, function(lyr, parent)
-        if not before[layerKey(lyr)] then
-            local lt = nil
-            pcall(function() lt = lyr:LayerType() end)
+    local remaining = {}
+    for sig, n in pairs(before.sigs) do remaining[sig] = n end
+    edit.eachLayer(moho, function(lyr, parent, path)
+        local lt = nil
+        pcall(function() lt = lyr:LayerType() end)
+        local isNew
+        local ok, uuid = pcall(function() return lyr:UUID() end)
+        if before.haveUuid and ok and uuid ~= nil and uuid ~= "" then
+            isNew = not before.uuids[tostring(uuid)]
+        else
+            local sig = path .. "|" .. tostring(lt)
+            if (remaining[sig] or 0) > 0 then
+                remaining[sig] = remaining[sig] - 1
+                isNew = false
+            else
+                isNew = true
+            end
+        end
+        if isNew then
             added[#added + 1] = {
                 layerId  = edit.layerId(moho, lyr),
                 name     = lyr:Name(),

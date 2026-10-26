@@ -68,23 +68,25 @@ function edit.findLayer(moho, ref)
     return nil, "layer must be a layer ID (number) or name (string)"
 end
 
---- Visit every layer depth-first: fn(layer, parentLayerOrNil).
+--- Visit every layer depth-first: fn(layer, parentLayerOrNil, path), where
+--- path is the "/"-joined names from the top level down to the layer.
 function edit.eachLayer(moho, fn)
-    local function walk(container, parent)
+    local function walk(container, parent, prefix)
         for i = 0, container:CountLayers() - 1 do
             local child = container:Layer(i)
             if child then
-                fn(child, parent)
+                local path = prefix .. "/" .. tostring(child:Name())
+                fn(child, parent, path)
                 local isGroup = false
                 pcall(function() isGroup = child:IsGroupType() end)
                 if isGroup then
                     local gOk, group = pcall(function() return moho:LayerAsGroup(child) end)
-                    if gOk and group then walk(group, child) end
+                    if gOk and group then walk(group, child, path) end
                 end
             end
         end
     end
-    walk(moho.document, nil)
+    walk(moho.document, nil, "")
 end
 
 --- Human-readable layer type name.

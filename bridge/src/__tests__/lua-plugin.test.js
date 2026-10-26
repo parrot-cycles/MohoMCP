@@ -272,6 +272,12 @@ local function newMesh()
   return m
 end
 
+-- With NO_UUID set, layer lookups return a fresh wrapper each time, like a
+-- binding that does not cache userdata, so identity cannot be compared.
+function wrap(l)
+  if NO_UUID and l then return setmetatable({}, {__index = l}) end
+  return l
+end
 local nextId = 0
 local function newLayer(name, lt)
   local l = {name=name, lt=lt, id=nextId, children={}}
@@ -283,9 +289,9 @@ local function newLayer(name, lt)
   function l:IsGroupType() return self.lt ~= MOHO.LT_VECTOR end
   function l:IsBoneType() return self.lt == MOHO.LT_BONE end
   function l:CountLayers() return #self.children end
-  function l:Layer(i) return self.children[i + 1] end
+  function l:Layer(i) return wrap(self.children[i + 1]) end
   function l:Parent() return self.parent end
-  function l:UUID() return "uuid-" .. self.id end
+  function l:UUID() if NO_UUID then error("UUID unavailable") end return "uuid-" .. self.id end
   return l
 end
 
@@ -309,7 +315,7 @@ end
 local root = {}
 doc = {}
 function doc:CountLayers() return #root end
-function doc:Layer(i) return root[i + 1] end
+function doc:Layer(i) return wrap(root[i + 1]) end
 local all = {}
 function doc:LayerByAbsoluteID(id) return all[id] end
 function doc:LayerAbsoluteID(l) return l and l.id or -1 end
@@ -509,6 +515,21 @@ end
     assert(v.name == "path1" and v.type == "vector" and v.parentId == g.layerId, json.encode(r))
     assert(restored(), "OpenFile/hideDialog/browseFirst not restored")
     assert(indexOf("PrepUndo nil") and edit.uiDirty)
+  `));
+
+  it("without layer:UUID() reports only the layers the import added", () => runLua(svgSetup + `
+    NO_UUID = true
+    -- Pre-existing layers include a group already called logo.svg with a path1 inside.
+    local oldG = moho:CreateNewLayer(MOHO.LT_GROUP, false); oldG:SetName("logo.svg")
+    local oldV = moho:CreateNewLayer(MOHO.LT_VECTOR, false); oldV:SetName("path1")
+    moho:PlaceLayerInGroup(oldV, oldG, true, false)
+    moho.layer = art
+    calls = {}
+    local r = assert(svgTools.import(moho, {path="/tmp/art/logo.svg"}))
+    assert(r.count == 2, "reported " .. r.count .. " layers: " .. json.encode(r.added))
+    local g, v = r.added[1], r.added[2]
+    assert(g.name == "logo.svg" and g.type == "group" and v.name == "path1" and v.parentId == g.layerId, json.encode(r))
+    assert(g.layerId ~= oldG.id, "matched the pre-existing group instead of the new one")
   `));
 
   it("restores the importer state when the import fails", () => runLua(svgSetup + `
